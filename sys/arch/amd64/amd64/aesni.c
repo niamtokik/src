@@ -1,4 +1,4 @@
-/*	$OpenBSD: aesni.c,v 1.46 2018/04/24 02:53:44 visa Exp $	*/
+/*	$OpenBSD: aesni.c,v 1.48 2018/06/14 18:44:43 mikeb Exp $	*/
 /*-
  * Copyright (c) 2003 Jason Wright
  * Copyright (c) 2003, 2004 Theo de Raadt
@@ -157,6 +157,7 @@ aesni_setup(void)
 	aesni_sc->sc_cid = crypto_get_driverid(CRYPTOCAP_F_MPSAFE);
 	if (aesni_sc->sc_cid < 0) {
 		free(aesni_sc, M_DEVBUF, sizeof(*aesni_sc));
+		aesni_sc = NULL;
 		return;
 	}
 
@@ -245,7 +246,9 @@ aesni_newsession(u_int32_t *sidp, struct cryptoini *cri)
 			}
 
 			/* prepare a hash subkey */
+			fpu_kernel_enter();
 			aesni_enc(ses, ses->ses_ghash->H, ses->ses_ghash->H);
+			fpu_kernel_exit();
 			break;
 
 		case CRYPTO_MD5_HMAC:

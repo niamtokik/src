@@ -1,4 +1,4 @@
-/* $OpenBSD: imxccm.c,v 1.2 2018/05/16 13:42:35 patrick Exp $ */
+/* $OpenBSD: imxccm.c,v 1.11 2018/08/20 16:48:03 patrick Exp $ */
 /*
  * Copyright (c) 2012-2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -31,6 +31,8 @@
 
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_clock.h>
+#include <dev/ofw/ofw_misc.h>
+#include <dev/ofw/ofw_regulator.h>
 #include <dev/ofw/fdt.h>
 
 #include <dev/fdt/imxanatopvar.h>
@@ -90,13 +92,69 @@
 #define CCM_CSCDR1_USDHCx_CLK_SEL_MASK		0x1
 #define CCM_CSCDR1_USDHCx_PODF_MASK		0x7
 #define CCM_CSCDR1_UART_PODF_MASK		0x7
+#define CCM_CSCDR2_ECSPI_PODF_SHIFT		19
+#define CCM_CSCDR2_ECSPI_PODF_MASK		0x7
 #define CCM_CCGR1_ENET				(3 << 10)
 #define CCM_CCGR4_125M_PCIE			(3 << 0)
 #define CCM_CCGR5_100M_SATA			(3 << 4)
 #define CCM_CSCMR1_PERCLK_CLK_PODF_MASK		0x1f
 #define CCM_CSCMR1_PERCLK_CLK_SEL_MASK		(1 << 6)
 
+/* Analog registers */
+#define CCM_ANALOG_PLL_USB1			0x0010
+#define CCM_ANALOG_PLL_USB1_SET			0x0014
+#define CCM_ANALOG_PLL_USB1_CLR			0x0018
+#define  CCM_ANALOG_PLL_USB1_LOCK		(1U << 31)
+#define  CCM_ANALOG_PLL_USB1_BYPASS		(1 << 16)
+#define  CCM_ANALOG_PLL_USB1_ENABLE		(1 << 13)
+#define  CCM_ANALOG_PLL_USB1_POWER		(1 << 12)
+#define  CCM_ANALOG_PLL_USB1_EN_USB_CLKS	(1 << 6)
+#define CCM_ANALOG_PLL_USB2			0x0020
+#define CCM_ANALOG_PLL_USB2_SET			0x0024
+#define CCM_ANALOG_PLL_USB2_CLR			0x0028
+#define  CCM_ANALOG_PLL_USB2_LOCK		(1U << 31)
+#define  CCM_ANALOG_PLL_USB2_BYPASS		(1 << 16)
+#define  CCM_ANALOG_PLL_USB2_ENABLE		(1 << 13)
+#define  CCM_ANALOG_PLL_USB2_POWER		(1 << 12)
+#define  CCM_ANALOG_PLL_USB2_EN_USB_CLKS	(1 << 6)
+#define CCM_ANALOG_PLL_ENET			0x00e0
+#define CCM_ANALOG_PLL_ENET_SET			0x00e4
+#define CCM_ANALOG_PLL_ENET_CLR			0x00e8
+#define  CCM_ANALOG_PLL_ENET_LOCK		(1U << 31)
+#define  CCM_ANALOG_PLL_ENET_ENABLE_100M	(1 << 20) /* i.MX6 */
+#define  CCM_ANALOG_PLL_ENET_BYPASS		(1 << 16)
+#define  CCM_ANALOG_PLL_ENET_ENABLE		(1 << 13) /* i.MX6 */
+#define  CCM_ANALOG_PLL_ENET_POWERDOWN		(1 << 12) /* i.MX6 */
+#define  CCM_ANALOG_PLL_ENET_ENABLE_CLK_125MHZ	(1 << 10) /* i.MX7 */
+
+/* Frac PLL */
+#define CCM_FRAC_IMX8M_ARM_PLL0			0x28
+#define CCM_FRAC_IMX8M_ARM_PLL1			0x2c
+#define  CCM_FRAC_PLL_LOCK				(1 << 31)
+#define  CCM_FRAC_PLL_ENABLE				(1 << 21)
+#define  CCM_FRAC_PLL_POWERDOWN				(1 << 19)
+#define  CCM_FRAC_PLL_REFCLK_SEL_SHIFT			16
+#define  CCM_FRAC_PLL_REFCLK_SEL_MASK			0x3
+#define  CCM_FRAC_PLL_LOCK_SEL				(1 << 15)
+#define  CCM_FRAC_PLL_BYPASS				(1 << 14)
+#define  CCM_FRAC_PLL_COUNTCLK_SEL			(1 << 13)
+#define  CCM_FRAC_PLL_NEWDIV_VAL			(1 << 12)
+#define  CCM_FRAC_PLL_NEWDIV_ACK			(1 << 11)
+#define  CCM_FRAC_PLL_REFCLK_DIV_VAL_SHIFT		5
+#define  CCM_FRAC_PLL_REFCLK_DIV_VAL_MASK		0x3f
+#define  CCM_FRAC_PLL_OUTPUT_DIV_VAL_SHIFT		0
+#define  CCM_FRAC_PLL_OUTPUT_DIV_VAL_MASK		0x1f
+#define  CCM_FRAC_PLL_FRAC_DIV_CTL_SHIFT		7
+#define  CCM_FRAC_PLL_FRAC_DIV_CTL_MASK			0x1ffffff
+#define  CCM_FRAC_PLL_INT_DIV_CTL_SHIFT			0
+#define  CCM_FRAC_PLL_INT_DIV_CTL_MASK			0x7f
+#define  CCM_FRAC_PLL_DENOM				(1 << 24)
+#define CCM_FRAC_IMX8M_PLLOUT_DIV_CFG		0x78
+#define  CCM_FRAC_IMX8M_PLLOUT_DIV_CFG_ARM_SHIFT	20
+#define  CCM_FRAC_IMX8M_PLLOUT_DIV_CFG_ARM_MASK		0x7
+
 #define HCLK_FREQ				24000000
+#define PLL3_60M				60000000
 #define PLL3_80M				80000000
 
 #define HREAD4(sc, reg)							\
@@ -109,9 +167,23 @@
 	HWRITE4((sc), (reg), HREAD4((sc), (reg)) & ~(bits))
 
 struct imxccm_gate {
-	uint8_t reg;
+	uint16_t reg;
 	uint8_t pos;
-	uint8_t parent;
+	uint16_t parent;
+};
+
+struct imxccm_divider {
+	uint16_t reg;
+	uint16_t shift;
+	uint16_t mask;
+	uint16_t parent;
+	uint16_t fixed;
+};
+
+struct imxccm_mux {
+	uint16_t reg;
+	uint16_t shift;
+	uint16_t mask;
 };
 
 #include "imxccm_clocks.h"
@@ -121,9 +193,16 @@ struct imxccm_softc {
 	bus_space_tag_t		sc_iot;
 	bus_space_handle_t	sc_ioh;
 	int			sc_node;
+	uint32_t		sc_phandle;
+
+	struct regmap		*sc_anatop;
 
 	struct imxccm_gate	*sc_gates;
 	int			sc_ngates;
+	struct imxccm_divider	*sc_divs;
+	int			sc_ndivs;
+	struct imxccm_mux	*sc_muxs;
+	int			sc_nmuxs;
 	struct clock_device	sc_cd;
 };
 
@@ -146,8 +225,16 @@ uint32_t imxccm_get_ahbclk(struct imxccm_softc *);
 uint32_t imxccm_get_ipgclk(struct imxccm_softc *);
 uint32_t imxccm_get_ipg_perclk(struct imxccm_softc *);
 uint32_t imxccm_get_uartclk(struct imxccm_softc *);
+uint32_t imxccm_imx8mq_ecspi(struct imxccm_softc *sc, uint32_t);
+uint32_t imxccm_imx8mq_enet(struct imxccm_softc *sc, uint32_t);
+uint32_t imxccm_imx8mq_i2c(struct imxccm_softc *sc, uint32_t);
+uint32_t imxccm_imx8mq_uart(struct imxccm_softc *sc, uint32_t);
+uint32_t imxccm_imx8mq_usdhc(struct imxccm_softc *sc, uint32_t);
+uint32_t imxccm_imx8mq_usb(struct imxccm_softc *sc, uint32_t);
 void imxccm_enable(void *, uint32_t *, int);
 uint32_t imxccm_get_frequency(void *, uint32_t *);
+int imxccm_set_frequency(void *, uint32_t *, uint32_t);
+int imxccm_set_parent(void *, uint32_t *, uint32_t *);
 
 int
 imxccm_match(struct device *parent, void *match, void *aux)
@@ -157,7 +244,9 @@ imxccm_match(struct device *parent, void *match, void *aux)
 	return (OF_is_compatible(faa->fa_node, "fsl,imx6q-ccm") ||
 	    OF_is_compatible(faa->fa_node, "fsl,imx6sl-ccm") ||
 	    OF_is_compatible(faa->fa_node, "fsl,imx6sx-ccm") ||
-	    OF_is_compatible(faa->fa_node, "fsl,imx6ul-ccm"));
+	    OF_is_compatible(faa->fa_node, "fsl,imx6ul-ccm") ||
+	    OF_is_compatible(faa->fa_node, "fsl,imx7d-ccm") ||
+	    OF_is_compatible(faa->fa_node, "fsl,imx8mq-ccm"));
 }
 
 void
@@ -174,7 +263,25 @@ imxccm_attach(struct device *parent, struct device *self, void *aux)
 	    faa->fa_reg[0].size, 0, &sc->sc_ioh))
 		panic("%s: bus_space_map failed!", __func__);
 
-	if (OF_is_compatible(sc->sc_node, "fsl,imx6ul-ccm")) {
+	sc->sc_phandle = OF_getpropint(sc->sc_node, "phandle", 0);
+
+	if (OF_is_compatible(sc->sc_node, "fsl,imx8mq-ccm")) {
+		sc->sc_anatop = regmap_bycompatible("fsl,imx8mq-anatop");
+		KASSERT(sc->sc_anatop != NULL);
+		sc->sc_gates = imx8mq_gates;
+		sc->sc_ngates = nitems(imx8mq_gates);
+		sc->sc_divs = imx8mq_divs;
+		sc->sc_ndivs = nitems(imx8mq_divs);
+		sc->sc_muxs = imx8mq_muxs;
+		sc->sc_nmuxs = nitems(imx8mq_muxs);
+	} else if (OF_is_compatible(sc->sc_node, "fsl,imx7d-ccm")) {
+		sc->sc_gates = imx7d_gates;
+		sc->sc_ngates = nitems(imx7d_gates);
+		sc->sc_divs = imx7d_divs;
+		sc->sc_ndivs = nitems(imx7d_divs);
+		sc->sc_muxs = imx7d_muxs;
+		sc->sc_nmuxs = nitems(imx7d_muxs);
+	} else if (OF_is_compatible(sc->sc_node, "fsl,imx6ul-ccm")) {
 		sc->sc_gates = imx6ul_gates;
 		sc->sc_ngates = nitems(imx6ul_gates);
 	} else {
@@ -188,6 +295,8 @@ imxccm_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_cd.cd_cookie = sc;
 	sc->sc_cd.cd_enable = imxccm_enable;
 	sc->sc_cd.cd_get_frequency = imxccm_get_frequency;
+	sc->sc_cd.cd_set_frequency = imxccm_set_frequency;
+	sc->sc_cd.cd_set_parent = imxccm_set_parent;
 	clock_register(&sc->sc_cd);
 }
 
@@ -230,6 +339,18 @@ imxccm_armclk_set_parent(struct imxccm_softc *sc, enum imxanatop_clocks clock)
 	default:
 		panic("%s: parent not possible for arm clk", __func__);
 	}
+}
+
+uint32_t
+imxccm_get_ecspiclk(struct imxccm_softc *sc)
+{
+	uint32_t clkroot = PLL3_60M;
+	uint32_t podf = HREAD4(sc, CCM_CSCDR2);
+
+	podf >>= CCM_CSCDR2_ECSPI_PODF_SHIFT;
+	podf &= CCM_CSCDR2_ECSPI_PODF_MASK;
+
+	return clkroot / (podf + 1);
 }
 
 unsigned int
@@ -332,34 +453,549 @@ imxccm_get_ipg_perclk(struct imxccm_softc *sc)
 }
 
 void
+imxccm_imx6_enable_pll_enet(struct imxccm_softc *sc, int on)
+{
+	KASSERT(on);
+
+	regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_ENET_CLR,
+	    CCM_ANALOG_PLL_ENET_POWERDOWN);
+
+	/* Wait for the PLL to lock. */
+	while ((regmap_read_4(sc->sc_anatop,
+	    CCM_ANALOG_PLL_ENET) & CCM_ANALOG_PLL_ENET_LOCK) == 0)
+		;
+
+	regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_ENET_CLR,
+	    CCM_ANALOG_PLL_ENET_BYPASS);
+}
+
+void
+imxccm_imx6_enable_pll_usb1(struct imxccm_softc *sc, int on)
+{
+	KASSERT(on);
+
+	regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB1_SET,
+	    CCM_ANALOG_PLL_USB1_POWER);
+
+	/* Wait for the PLL to lock. */
+	while ((regmap_read_4(sc->sc_anatop,
+	    CCM_ANALOG_PLL_USB1) & CCM_ANALOG_PLL_USB1_LOCK) == 0)
+		;
+
+	regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB1_CLR,
+	    CCM_ANALOG_PLL_USB1_BYPASS);
+}
+
+void
+imxccm_imx6_enable_pll_usb2(struct imxccm_softc *sc, int on)
+{
+	KASSERT(on);
+
+	regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB2_SET,
+	    CCM_ANALOG_PLL_USB2_POWER);
+
+	/* Wait for the PLL to lock. */
+	while ((regmap_read_4(sc->sc_anatop,
+	    CCM_ANALOG_PLL_USB2) & CCM_ANALOG_PLL_USB2_LOCK) == 0)
+		;
+
+	regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB2_CLR,
+	    CCM_ANALOG_PLL_USB2_BYPASS);
+}
+
+uint32_t
+imxccm_imx7d_enet(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc");
+	case 7:
+		return 392000000; /* pll_sys_pfd4_clk XXX not fixed */
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx7d_i2c(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc");
+	case 1:
+		return 120000000; /* pll_sys_main_120m_clk */
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx7d_uart(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc");
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx7d_usdhc(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc");
+	case 1:
+		return 392000000; /* pll_sys_pfd0_392m_clk */
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx8mq_ecspi(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc_25m");
+	case 1:
+		return 200 * 1000 * 1000; /* sys2_pll_200m */
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx8mq_enet(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc_25m");
+	case 1:
+		return 266 * 1000 * 1000; /* sys1_pll_266m */
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx8mq_i2c(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc_25m");
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx8mq_uart(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc_25m");
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx8mq_usdhc(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc_25m");
+	case 1:
+		return 400 * 1000 * 1000; /* sys1_pll_400m */
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx8mq_usb(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t mux;
+
+	if (idx >= sc->sc_nmuxs || sc->sc_muxs[idx].reg == 0)
+		return 0;
+
+	mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+	mux >>= sc->sc_muxs[idx].shift;
+	mux &= sc->sc_muxs[idx].mask;
+
+	switch (mux) {
+	case 0:
+		return clock_get_frequency(sc->sc_node, "osc_25m");
+	case 1:
+		if (idx == IMX8MQ_CLK_USB_CORE_REF_SRC ||
+		    idx == IMX8MQ_CLK_USB_PHY_REF_SRC)
+			return 100 * 1000 * 1000; /* sys1_pll_100m */
+		if (idx == IMX8MQ_CLK_USB_BUS_SRC)
+			return 500 * 1000 * 1000; /* sys2_pll_500m */
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+}
+
+uint32_t
+imxccm_imx8mq_get_pll(struct imxccm_softc *sc, uint32_t idx)
+{
+	uint32_t divr_val, divq_val, divf_val;
+	uint32_t divff, divfi;
+	uint32_t pllout_div;
+	uint32_t pll0, pll1;
+	uint32_t freq;
+	uint32_t mux;
+
+	pllout_div = regmap_read_4(sc->sc_anatop, CCM_FRAC_IMX8M_PLLOUT_DIV_CFG);
+
+	switch (idx) {
+	case IMX8MQ_ARM_PLL:
+		pll0 = regmap_read_4(sc->sc_anatop, CCM_FRAC_IMX8M_ARM_PLL0);
+		pll1 = regmap_read_4(sc->sc_anatop, CCM_FRAC_IMX8M_ARM_PLL1);
+		pllout_div >>= CCM_FRAC_IMX8M_PLLOUT_DIV_CFG_ARM_SHIFT;
+		pllout_div &= CCM_FRAC_IMX8M_PLLOUT_DIV_CFG_ARM_MASK;
+		break;
+	default:
+		printf("%s: 0x%08x\n", __func__, idx);
+		return 0;
+	}
+
+	if (pll0 & CCM_FRAC_PLL_POWERDOWN)
+		return 0;
+
+	if ((pll0 & CCM_FRAC_PLL_ENABLE) == 0)
+		return 0;
+
+	mux = (pll0 >> CCM_FRAC_PLL_REFCLK_SEL_SHIFT) &
+	    CCM_FRAC_PLL_REFCLK_SEL_MASK;
+	switch (mux) {
+	case 0:
+		freq = clock_get_frequency(sc->sc_node, "osc_25m");
+		break;
+	case 1:
+	case 2:
+		freq = clock_get_frequency(sc->sc_node, "osc_27m");
+		break;
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return 0;
+	}
+
+	if (pll0 & CCM_FRAC_PLL_BYPASS)
+		return freq;
+
+	divr_val = (pll0 >> CCM_FRAC_PLL_REFCLK_DIV_VAL_SHIFT) &
+	    CCM_FRAC_PLL_REFCLK_DIV_VAL_MASK;
+	divq_val = pll0 & CCM_FRAC_PLL_OUTPUT_DIV_VAL_MASK;
+	divff = (pll1 >> CCM_FRAC_PLL_FRAC_DIV_CTL_SHIFT) &
+	    CCM_FRAC_PLL_FRAC_DIV_CTL_MASK;
+	divfi = pll1 & CCM_FRAC_PLL_INT_DIV_CTL_MASK;
+	divf_val = 1 + divfi + divff / CCM_FRAC_PLL_DENOM;
+
+	freq = freq / (divr_val + 1) * 8 * divf_val / ((divq_val + 1) * 2);
+	return freq / (pllout_div + 1);
+}
+
+int
+imxccm_imx8mq_set_pll(struct imxccm_softc *sc, uint32_t idx, uint64_t freq)
+{
+	uint64_t divff, divfi, divr;
+	uint32_t pllout_div;
+	uint32_t pll0, pll1;
+	uint32_t mux, reg;
+	uint64_t pfreq;
+	int i;
+
+	pllout_div = regmap_read_4(sc->sc_anatop, CCM_FRAC_IMX8M_PLLOUT_DIV_CFG);
+
+	switch (idx) {
+	case IMX8MQ_ARM_PLL:
+		pll0 = CCM_FRAC_IMX8M_ARM_PLL0;
+		pll1 = CCM_FRAC_IMX8M_ARM_PLL1;
+		pllout_div >>= CCM_FRAC_IMX8M_PLLOUT_DIV_CFG_ARM_SHIFT;
+		pllout_div &= CCM_FRAC_IMX8M_PLLOUT_DIV_CFG_ARM_MASK;
+		/* XXX: Assume fixed divider to ease math. */
+		KASSERT(pllout_div == 0);
+		divr = 5;
+		break;
+	default:
+		printf("%s: 0x%08x\n", __func__, idx);
+		return -1;
+	}
+
+	reg = regmap_read_4(sc->sc_anatop, pll0);
+	mux = (reg >> CCM_FRAC_PLL_REFCLK_SEL_SHIFT) &
+	    CCM_FRAC_PLL_REFCLK_SEL_MASK;
+	switch (mux) {
+	case 0:
+		pfreq = clock_get_frequency(sc->sc_node, "osc_25m");
+		break;
+	case 1:
+	case 2:
+		pfreq = clock_get_frequency(sc->sc_node, "osc_27m");
+		break;
+	default:
+		printf("%s: 0x%08x 0x%08x\n", __func__, idx, mux);
+		return -1;
+	}
+
+	/* Frac divider follows the PLL */
+	freq *= divr;
+
+	/* PLL calculation */
+	freq *= 2;
+	pfreq *= 8;
+	divfi = freq / pfreq;
+	divff = (uint64_t)(freq - divfi * pfreq);
+	divff = (divff * CCM_FRAC_PLL_DENOM) / pfreq;
+
+	reg = regmap_read_4(sc->sc_anatop, pll1);
+	reg &= ~(CCM_FRAC_PLL_FRAC_DIV_CTL_MASK << CCM_FRAC_PLL_FRAC_DIV_CTL_SHIFT);
+	reg |= divff << CCM_FRAC_PLL_FRAC_DIV_CTL_SHIFT;
+	reg &= ~(CCM_FRAC_PLL_INT_DIV_CTL_MASK << CCM_FRAC_PLL_INT_DIV_CTL_SHIFT);
+	reg |= (divfi - 1) << CCM_FRAC_PLL_INT_DIV_CTL_SHIFT;
+	regmap_write_4(sc->sc_anatop, pll1, reg);
+
+	reg = regmap_read_4(sc->sc_anatop, pll0);
+	reg &= ~CCM_FRAC_PLL_OUTPUT_DIV_VAL_MASK;
+	reg &= ~(CCM_FRAC_PLL_REFCLK_DIV_VAL_MASK << CCM_FRAC_PLL_REFCLK_DIV_VAL_SHIFT);
+	reg |= (divr - 1) << CCM_FRAC_PLL_REFCLK_DIV_VAL_SHIFT;
+	regmap_write_4(sc->sc_anatop, pll0, reg);
+
+	reg = regmap_read_4(sc->sc_anatop, pll0);
+	reg |= CCM_FRAC_PLL_NEWDIV_VAL;
+	regmap_write_4(sc->sc_anatop, pll0, reg);
+
+	for (i = 0; i < 5000; i++) {
+		reg = regmap_read_4(sc->sc_anatop, pll0);
+		if (reg & CCM_FRAC_PLL_BYPASS)
+			break;
+		if (reg & CCM_FRAC_PLL_POWERDOWN)
+			break;
+		if (reg & CCM_FRAC_PLL_NEWDIV_ACK)
+			break;
+		delay(10);
+	}
+	if (i == 5000)
+		printf("%s: timeout\n", __func__);
+
+	reg = regmap_read_4(sc->sc_anatop, pll0);
+	reg &= ~CCM_FRAC_PLL_NEWDIV_VAL;
+	regmap_write_4(sc->sc_anatop, pll0, reg);
+
+	return 0;
+}
+
+void
+imxccm_enable_parent(struct imxccm_softc *sc, uint32_t parent, int on)
+{
+	if (on)
+		imxccm_enable(sc, &parent, on);
+}
+
+void
 imxccm_enable(void *cookie, uint32_t *cells, int on)
 {
 	struct imxccm_softc *sc = cookie;
-	uint32_t idx = cells[0];
-	uint8_t reg, pos;
+	uint32_t idx = cells[0], parent;
+	uint16_t reg;
+	uint8_t pos;
 
 	/* Dummy clock. */
 	if (idx == 0)
 		return;
 
-	if (sc->sc_gates == imx6_gates) {
+	if (sc->sc_gates == imx7d_gates) {
+		if (sc->sc_anatop == NULL) {
+			sc->sc_anatop = regmap_bycompatible("fsl,imx7d-anatop");
+			KASSERT(sc->sc_anatop);
+		}
+
 		switch (idx) {
+		case IMX7D_PLL_ENET_MAIN_125M_CLK:
+			regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_ENET_SET,
+			    CCM_ANALOG_PLL_ENET_ENABLE_CLK_125MHZ);
+			return;
+		default:
+			break;
+		}
+	} else if (sc->sc_gates == imx6_gates) {
+		if (sc->sc_anatop == NULL) {
+			sc->sc_anatop = regmap_bycompatible("fsl,imx6q-anatop");
+			KASSERT(sc->sc_anatop);
+		}
+
+		switch (idx) {
+		case IMX6_CLK_PLL3:
+			imxccm_imx6_enable_pll_usb1(sc, on);
+			return;
+		case IMX6_CLK_PLL6:
+			imxccm_imx6_enable_pll_enet(sc, on);
+			return;
+		case IMX6_CLK_PLL7:
+			imxccm_imx6_enable_pll_usb2(sc, on);
+			return;
+		case IMX6_CLK_PLL3_USB_OTG:
+			imxccm_enable_parent(sc, IMX6_CLK_PLL3, on);
+			regmap_write_4(sc->sc_anatop,
+			    on ? CCM_ANALOG_PLL_USB1_SET : CCM_ANALOG_PLL_USB1_CLR,
+			    CCM_ANALOG_PLL_USB1_ENABLE);
+			return;
+		case IMX6_CLK_PLL6_ENET:
+			imxccm_enable_parent(sc, IMX6_CLK_PLL6, on);
+			regmap_write_4(sc->sc_anatop,
+			    on ? CCM_ANALOG_PLL_ENET_SET : CCM_ANALOG_PLL_ENET_CLR,
+			    CCM_ANALOG_PLL_ENET_ENABLE);
+			return;
+		case IMX6_CLK_PLL7_USB_HOST:
+			imxccm_enable_parent(sc, IMX6_CLK_PLL7, on);
+			regmap_write_4(sc->sc_anatop,
+			    on ? CCM_ANALOG_PLL_USB2_SET : CCM_ANALOG_PLL_USB2_CLR,
+			    CCM_ANALOG_PLL_USB2_ENABLE);
+			return;
 		case IMX6_CLK_USBPHY1:
-			imxanatop_enable_pll_usb1();
+			/* PLL outputs should alwas be on. */
+			regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB1_SET,
+			    CCM_ANALOG_PLL_USB1_EN_USB_CLKS);
+			imxccm_enable_parent(sc, IMX6_CLK_PLL3_USB_OTG, on);
 			return;
 		case IMX6_CLK_USBPHY2:
-			imxanatop_enable_pll_usb2();
+			/* PLL outputs should alwas be on. */
+			regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB2_SET,
+			    CCM_ANALOG_PLL_USB2_EN_USB_CLKS);
+			imxccm_enable_parent(sc, IMX6_CLK_PLL7_USB_HOST, on);
 			return;
 		case IMX6_CLK_SATA_REF_100:
-			imxanatop_enable_sata();
+			imxccm_enable_parent(sc, IMX6_CLK_PLL6_ENET, on);
+			regmap_write_4(sc->sc_anatop,
+			   on ? CCM_ANALOG_PLL_ENET_SET : CCM_ANALOG_PLL_ENET_CLR,
+			   CCM_ANALOG_PLL_ENET_ENABLE_100M);
 			return;
 		case IMX6_CLK_ENET_REF:
-			imxanatop_enable_enet();
+			imxccm_enable_parent(sc, IMX6_CLK_PLL6_ENET, on);
+			return;
+		case IMX6_CLK_IPG:
+		case IMX6_CLK_IPG_PER:
+		case IMX6_CLK_ECSPI_ROOT:
+			/* always on */
 			return;
 		default:
 			break;
 		}
 	}
+
+	if (on) {
+		if (idx < sc->sc_ngates && sc->sc_gates[idx].parent) {
+			parent = sc->sc_gates[idx].parent;
+			imxccm_enable(sc, &parent, on);
+		}
+
+		if (idx < sc->sc_ndivs && sc->sc_divs[idx].parent) {
+			parent = sc->sc_divs[idx].parent;
+			imxccm_enable(sc, &parent, on);
+		}
+	}
+
+	if ((idx < sc->sc_ndivs && sc->sc_divs[idx].reg != 0) ||
+	    (idx < sc->sc_nmuxs && sc->sc_muxs[idx].reg != 0))
+		return;
 
 	if (idx >= sc->sc_ngates || sc->sc_gates[idx].reg == 0) {
 		printf("%s: 0x%08x\n", __func__, idx);
@@ -380,7 +1016,7 @@ imxccm_get_frequency(void *cookie, uint32_t *cells)
 {
 	struct imxccm_softc *sc = cookie;
 	uint32_t idx = cells[0];
-	uint32_t parent;
+	uint32_t div, parent;
 
 	/* Dummy clock. */
 	if (idx == 0)
@@ -391,7 +1027,68 @@ imxccm_get_frequency(void *cookie, uint32_t *cells)
 		return imxccm_get_frequency(sc, &parent);
 	}
 
-	if (sc->sc_gates == imx6ul_gates) {
+	if (idx < sc->sc_ndivs && sc->sc_divs[idx].parent) {
+		div = HREAD4(sc, sc->sc_divs[idx].reg);
+		div = div >> sc->sc_divs[idx].shift;
+		div = div & sc->sc_divs[idx].mask;
+		parent = sc->sc_divs[idx].parent;
+		return imxccm_get_frequency(sc, &parent) / (div + 1);
+	}
+
+	if (sc->sc_gates == imx8mq_gates) {
+		switch (idx) {
+		case IMX8MQ_ARM_PLL:
+			return imxccm_imx8mq_get_pll(sc, idx);
+		case IMX8MQ_CLK_A53_SRC:
+			parent = IMX8MQ_ARM_PLL;
+			return imxccm_get_frequency(sc, &parent);
+		case IMX8MQ_CLK_ENET_AXI_SRC:
+			return imxccm_imx8mq_enet(sc, idx);
+		case IMX8MQ_CLK_I2C1_SRC:
+		case IMX8MQ_CLK_I2C2_SRC:
+		case IMX8MQ_CLK_I2C3_SRC:
+		case IMX8MQ_CLK_I2C4_SRC:
+			return imxccm_imx8mq_i2c(sc, idx);
+		case IMX8MQ_CLK_UART1_SRC:
+		case IMX8MQ_CLK_UART2_SRC:
+		case IMX8MQ_CLK_UART3_SRC:
+		case IMX8MQ_CLK_UART4_SRC:
+			return imxccm_imx8mq_uart(sc, idx);
+		case IMX8MQ_CLK_USDHC1_SRC:
+		case IMX8MQ_CLK_USDHC2_SRC:
+			return imxccm_imx8mq_usdhc(sc, idx);
+		case IMX8MQ_CLK_USB_BUS_SRC:
+		case IMX8MQ_CLK_USB_CORE_REF_SRC:
+		case IMX8MQ_CLK_USB_PHY_REF_SRC:
+			return imxccm_imx8mq_usb(sc, idx);
+		case IMX8MQ_CLK_ECSPI1_SRC:
+		case IMX8MQ_CLK_ECSPI2_SRC:
+		case IMX8MQ_CLK_ECSPI3_SRC:
+			return imxccm_imx8mq_ecspi(sc, idx);
+		}
+	} else if (sc->sc_gates == imx7d_gates) {
+		switch (idx) {
+		case IMX7D_ENET_AXI_ROOT_SRC:
+			return imxccm_imx7d_enet(sc, idx);
+		case IMX7D_I2C1_ROOT_SRC:
+		case IMX7D_I2C2_ROOT_SRC:
+		case IMX7D_I2C3_ROOT_SRC:
+		case IMX7D_I2C4_ROOT_SRC:
+			return imxccm_imx7d_i2c(sc, idx);
+		case IMX7D_UART1_ROOT_SRC:
+		case IMX7D_UART2_ROOT_SRC:
+		case IMX7D_UART3_ROOT_SRC:
+		case IMX7D_UART4_ROOT_SRC:
+		case IMX7D_UART5_ROOT_SRC:
+		case IMX7D_UART6_ROOT_SRC:
+		case IMX7D_UART7_ROOT_SRC:
+			return imxccm_imx7d_uart(sc, idx);
+		case IMX7D_USDHC1_ROOT_SRC:
+		case IMX7D_USDHC2_ROOT_SRC:
+		case IMX7D_USDHC3_ROOT_SRC:
+			return imxccm_imx7d_usdhc(sc, idx);
+		}
+	} else if (sc->sc_gates == imx6ul_gates) {
 		switch (idx) {
 		case IMX6UL_CLK_ARM:
 			return imxccm_get_armclk(sc);
@@ -405,7 +1102,7 @@ imxccm_get_frequency(void *cookie, uint32_t *cells)
 		case IMX6UL_CLK_USDHC2:
 			return imxccm_get_usdhx(sc, idx - IMX6UL_CLK_USDHC1 + 1);
 		}
-	} else {
+	} else if (sc->sc_gates == imx6_gates) {
 		switch (idx) {
 		case IMX6_CLK_AHB:
 			return imxccm_get_ahbclk(sc);
@@ -415,6 +1112,8 @@ imxccm_get_frequency(void *cookie, uint32_t *cells)
 			return imxccm_get_ipgclk(sc);
 		case IMX6_CLK_IPG_PER:
 			return imxccm_get_ipg_perclk(sc);
+		case IMX6_CLK_ECSPI_ROOT:
+			return imxccm_get_ecspiclk(sc);
 		case IMX6_CLK_UART_SERIAL:
 			return imxccm_get_uartclk(sc);
 		case IMX6_CLK_USDHC1:
@@ -429,3 +1128,124 @@ imxccm_get_frequency(void *cookie, uint32_t *cells)
 	return 0;
 }
 
+int
+imxccm_set_frequency(void *cookie, uint32_t *cells, uint32_t freq)
+{
+	struct imxccm_softc *sc = cookie;
+	uint32_t idx = cells[0];
+	uint32_t reg, div, parent, parent_freq;
+	uint32_t pcells[2];
+	int ret;
+
+	if (sc->sc_divs == imx8mq_divs) {
+		switch (idx) {
+		case IMX8MQ_CLK_A53_DIV:
+			parent = IMX8MQ_CLK_A53_SRC;
+			return imxccm_set_frequency(cookie, &parent, freq);
+		case IMX8MQ_CLK_A53_SRC:
+			pcells[0] = sc->sc_phandle;
+			pcells[1] = IMX8MQ_SYS1_PLL_800M;
+			ret = imxccm_set_parent(cookie, &idx, pcells);
+			if (ret)
+				return ret;
+			ret = imxccm_imx8mq_set_pll(sc, IMX8MQ_ARM_PLL, freq);
+			pcells[0] = sc->sc_phandle;
+			pcells[1] = IMX8MQ_ARM_PLL_OUT;
+			imxccm_set_parent(cookie, &idx, pcells);
+			return ret;
+		case IMX8MQ_CLK_USB_BUS_SRC:
+		case IMX8MQ_CLK_USB_CORE_REF_SRC:
+		case IMX8MQ_CLK_USB_PHY_REF_SRC:
+			if (imxccm_get_frequency(sc, cells) != freq)
+				break;
+			return 0;
+		case IMX8MQ_CLK_USDHC1_DIV:
+			parent = sc->sc_divs[idx].parent;
+			if (imxccm_get_frequency(sc, &parent) != freq)
+				break;
+			imxccm_enable(cookie, &parent, 1);
+			reg = HREAD4(sc, sc->sc_divs[idx].reg);
+			reg &= ~(sc->sc_divs[idx].mask << sc->sc_divs[idx].shift);
+			reg |= (0x0 << sc->sc_divs[idx].shift);
+			HWRITE4(sc, sc->sc_divs[idx].reg, reg);
+			return 0;
+		}
+	} else if (sc->sc_divs == imx7d_divs) {
+		switch (idx) {
+		case IMX7D_USDHC1_ROOT_CLK:
+		case IMX7D_USDHC2_ROOT_CLK:
+		case IMX7D_USDHC3_ROOT_CLK:
+			parent = sc->sc_gates[idx].parent;
+			return imxccm_set_frequency(sc, &parent, freq);
+		case IMX7D_USDHC1_ROOT_DIV:
+		case IMX7D_USDHC2_ROOT_DIV:
+		case IMX7D_USDHC3_ROOT_DIV:
+			parent = sc->sc_divs[idx].parent;
+			parent_freq = imxccm_get_frequency(sc, &parent);
+			div = 0;
+			while (parent_freq / (div + 1) > freq)
+				div++;
+			reg = HREAD4(sc, sc->sc_divs[idx].reg);
+			reg &= ~(sc->sc_divs[idx].mask << sc->sc_divs[idx].shift);
+			reg |= (div << sc->sc_divs[idx].shift);
+			HWRITE4(sc, sc->sc_divs[idx].reg, reg);
+			return 0;
+		}
+	}
+
+	printf("%s: 0x%08x %x\n", __func__, idx, freq);
+	return -1;
+}
+
+int
+imxccm_set_parent(void *cookie, uint32_t *cells, uint32_t *pcells)
+{
+	struct imxccm_softc *sc = cookie;
+	uint32_t idx = cells[0];
+	uint32_t pidx;
+	uint32_t mux;
+
+	if (pcells[0] != sc->sc_phandle) {
+		printf("%s: 0x%08x parent 0x%08x\n", __func__, idx, pcells[0]);
+		return -1;
+	}
+
+	pidx = pcells[1];
+
+	if (sc->sc_muxs == imx8mq_muxs) {
+		switch (idx) {
+		case IMX8MQ_CLK_A53_SRC:
+			if (pidx != IMX8MQ_ARM_PLL_OUT &&
+			    pidx != IMX8MQ_SYS1_PLL_800M)
+				break;
+			mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+			mux &= ~(sc->sc_muxs[idx].mask << sc->sc_muxs[idx].shift);
+			if (pidx == IMX8MQ_ARM_PLL_OUT)
+				mux |= (0x1 << sc->sc_muxs[idx].shift);
+			if (pidx == IMX8MQ_SYS1_PLL_800M)
+				mux |= (0x4 << sc->sc_muxs[idx].shift);
+			HWRITE4(sc, sc->sc_muxs[idx].reg, mux);
+			return 0;
+		case IMX8MQ_CLK_USB_BUS_SRC:
+			if (pidx != IMX8MQ_SYS2_PLL_500M)
+				break;
+			mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+			mux &= ~(sc->sc_muxs[idx].mask << sc->sc_muxs[idx].shift);
+			mux |= (0x1 << sc->sc_muxs[idx].shift);
+			HWRITE4(sc, sc->sc_muxs[idx].reg, mux);
+			return 0;
+		case IMX8MQ_CLK_USB_CORE_REF_SRC:
+		case IMX8MQ_CLK_USB_PHY_REF_SRC:
+			if (pidx != IMX8MQ_SYS1_PLL_100M)
+				break;
+			mux = HREAD4(sc, sc->sc_muxs[idx].reg);
+			mux &= ~(sc->sc_muxs[idx].mask << sc->sc_muxs[idx].shift);
+			mux |= (0x1 << sc->sc_muxs[idx].shift);
+			HWRITE4(sc, sc->sc_muxs[idx].reg, mux);
+			return 0;
+		}
+	}
+
+	printf("%s: 0x%08x 0x%08x\n", __func__, idx, pidx);
+	return -1;
+}

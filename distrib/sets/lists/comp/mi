@@ -1,5 +1,4 @@
 ./sys
-./usr/bin/c++
 ./usr/bin/c++filt
 ./usr/bin/cpp
 ./usr/bin/ctfdump
@@ -329,6 +328,7 @@
 ./usr/include/dev/ic/pckbcvar.h
 ./usr/include/dev/ic/pgtreg.h
 ./usr/include/dev/ic/pgtvar.h
+./usr/include/dev/ic/pluartvar.h
 ./usr/include/dev/ic/pt2254a.h
 ./usr/include/dev/ic/qlareg.h
 ./usr/include/dev/ic/qlavar.h
@@ -540,6 +540,7 @@
 ./usr/include/dev/pci/if_bcereg.h
 ./usr/include/dev/pci/if_bgereg.h
 ./usr/include/dev/pci/if_bnxreg.h
+./usr/include/dev/pci/if_bnxtreg.h
 ./usr/include/dev/pci/if_bwfm_pci.h
 ./usr/include/dev/pci/if_casreg.h
 ./usr/include/dev/pci/if_casvar.h
@@ -710,6 +711,8 @@
 ./usr/include/dev/sdmmc/sdmmcvar.h
 ./usr/include/dev/softraidvar.h
 ./usr/include/dev/spdmemvar.h
+./usr/include/dev/spi
+./usr/include/dev/spi/spivar.h
 ./usr/include/dev/sun
 ./usr/include/dev/sun/disklabel.h
 ./usr/include/dev/sun/sunkbdreg.h
@@ -746,6 +749,7 @@
 ./usr/include/dev/usb/if_kuereg.h
 ./usr/include/dev/usb/if_kuevar.h
 ./usr/include/dev/usb/if_mosreg.h
+./usr/include/dev/usb/if_muereg.h
 ./usr/include/dev/usb/if_otusreg.h
 ./usr/include/dev/usb/if_ralreg.h
 ./usr/include/dev/usb/if_ralvar.h
@@ -837,6 +841,11 @@
 ./usr/include/dev/wsfont/bold8x16-iso1.h
 ./usr/include/dev/wsfont/bold8x16.h
 ./usr/include/dev/wsfont/gallant12x22.h
+./usr/include/dev/wsfont/spleen12x24.h
+./usr/include/dev/wsfont/spleen16x32.h
+./usr/include/dev/wsfont/spleen32x64.h
+./usr/include/dev/wsfont/spleen5x8.h
+./usr/include/dev/wsfont/spleen8x16.h
 ./usr/include/dev/wsfont/wsfont.h
 ./usr/include/dev/x86emu
 ./usr/include/dev/x86emu/x86emu.h
@@ -924,6 +933,7 @@
 ./usr/include/net/hfsc.h
 ./usr/include/net/if.h
 ./usr/include/net/if_arp.h
+./usr/include/net/if_bpe.h
 ./usr/include/net/if_bridge.h
 ./usr/include/net/if_dl.h
 ./usr/include/net/if_enc.h
@@ -958,7 +968,6 @@
 ./usr/include/net/ppp-comp.h
 ./usr/include/net/ppp_defs.h
 ./usr/include/net/radix.h
-./usr/include/net/raw_cb.h
 ./usr/include/net/route.h
 ./usr/include/net/rtable.h
 ./usr/include/net/slcompress.h
@@ -1051,7 +1060,6 @@
 ./usr/include/openssl
 ./usr/include/openssl/aes.h
 ./usr/include/openssl/asn1.h
-./usr/include/openssl/asn1_mac.h
 ./usr/include/openssl/asn1t.h
 ./usr/include/openssl/bio.h
 ./usr/include/openssl/blowfish.h
@@ -1104,6 +1112,7 @@
 ./usr/include/openssl/rsa.h
 ./usr/include/openssl/safestack.h
 ./usr/include/openssl/sha.h
+./usr/include/openssl/sm3.h
 ./usr/include/openssl/srtp.h
 ./usr/include/openssl/ssl.h
 ./usr/include/openssl/ssl2.h
@@ -1277,6 +1286,7 @@
 ./usr/include/sys/ioctl.h
 ./usr/include/sys/ipc.h
 ./usr/include/sys/kcore.h
+./usr/include/sys/kcov.h
 ./usr/include/sys/kernel.h
 ./usr/include/sys/kthread.h
 ./usr/include/sys/ktrace.h
@@ -1319,6 +1329,7 @@
 ./usr/include/sys/sensors.h
 ./usr/include/sys/shm.h
 ./usr/include/sys/siginfo.h
+./usr/include/sys/sigio.h
 ./usr/include/sys/signal.h
 ./usr/include/sys/signalvar.h
 ./usr/include/sys/socket.h
@@ -1512,7 +1523,6 @@
 ./usr/lib/libz.a
 ./usr/lib/libz_p.a
 ./usr/lib/rcrt0.o
-./usr/libexec/cpp
 ./usr/sbin/kgmon
 ./usr/share/info/binutils.info
 ./usr/share/man/man1/addr2line.1
@@ -1594,7 +1604,6 @@
 ./usr/share/man/man2/i386/i386_get_fsbase.2
 ./usr/share/man/man2/i386/i386_get_gsbase.2
 ./usr/share/man/man2/i386/i386_iopl.2
-./usr/share/man/man2/i386/i386_vm86.2
 ./usr/share/man/man2/intro.2
 ./usr/share/man/man2/ioctl.2
 ./usr/share/man/man2/issetugid.2
@@ -1678,12 +1687,14 @@
 ./usr/share/man/man2/truncate.2
 ./usr/share/man/man2/umask.2
 ./usr/share/man/man2/unlink.2
+./usr/share/man/man2/unveil.2
 ./usr/share/man/man2/utimes.2
 ./usr/share/man/man2/utrace.2
 ./usr/share/man/man2/vfork.2
 ./usr/share/man/man2/wait.2
 ./usr/share/man/man2/write.2
 ./usr/share/man/man3/ACCESS_DESCRIPTION_new.3
+./usr/share/man/man3/ASN1_INTEGER_get.3
 ./usr/share/man/man3/ASN1_OBJECT_new.3
 ./usr/share/man/man3/ASN1_STRING_TABLE_add.3
 ./usr/share/man/man3/ASN1_STRING_length.3
@@ -2305,7 +2316,21 @@
 ./usr/share/man/man3/fts.3
 ./usr/share/man/man3/ftw.3
 ./usr/share/man/man3/funopen.3
+./usr/share/man/man3/fuse_chan_fd.3
+./usr/share/man/man3/fuse_daemonize.3
+./usr/share/man/man3/fuse_destroy.3
+./usr/share/man/man3/fuse_get_context.3
+./usr/share/man/man3/fuse_get_session.3
+./usr/share/man/man3/fuse_loop.3
 ./usr/share/man/man3/fuse_main.3
+./usr/share/man/man3/fuse_mount.3
+./usr/share/man/man3/fuse_new.3
+./usr/share/man/man3/fuse_opt.3
+./usr/share/man/man3/fuse_parse_cmdline.3
+./usr/share/man/man3/fuse_set_signal_handlers.3
+./usr/share/man/man3/fuse_setup.3
+./usr/share/man/man3/fuse_teardown.3
+./usr/share/man/man3/fuse_version.3
 ./usr/share/man/man3/fwide.3
 ./usr/share/man/man3/gai_strerror.3
 ./usr/share/man/man3/get_rfc3526_prime_8192.3
@@ -2683,6 +2708,7 @@
 ./usr/share/man/man3/time.3
 ./usr/share/man/man3/time2posix.3
 ./usr/share/man/man3/times.3
+./usr/share/man/man3/timespec_get.3
 ./usr/share/man/man3/timingsafe_bcmp.3
 ./usr/share/man/man3/tls_accept_socket.3
 ./usr/share/man/man3/tls_client.3
@@ -2869,6 +2895,7 @@
 ./usr/share/man/man9/rtrequest.9
 ./usr/share/man/man9/rwlock.9
 ./usr/share/man/man9/sensor_attach.9
+./usr/share/man/man9/sigio_init.9
 ./usr/share/man/man9/socreate.9
 ./usr/share/man/man9/sosplice.9
 ./usr/share/man/man9/spl.9

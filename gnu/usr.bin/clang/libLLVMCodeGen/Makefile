@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.6 2018/04/06 14:44:04 patrick Exp $
+# $OpenBSD: Makefile,v 1.8 2018/08/12 16:59:31 mortimer Exp $
 
 LIB=	LLVMCodeGen
 NOPIC=
@@ -129,6 +129,8 @@ SRCS=	AggressiveAntiDepBreaker.cpp \
 	RegisterUsageInfo.cpp \
 	RenameIndependentSubregs.cpp \
 	ResetMachineFunctionPass.cpp \
+	ReturnProtectorLowering.cpp \
+	ReturnProtectorPass.cpp \
 	SafeStack.cpp \
 	SafeStackColoring.cpp \
 	SafeStackLayout.cpp \

@@ -1,4 +1,4 @@
-/*	$OpenBSD: slaacd.c,v 1.22 2018/05/17 13:39:00 florian Exp $	*/
+/*	$OpenBSD: slaacd.c,v 1.31 2018/08/19 12:29:03 florian Exp $	*/
 
 /*
  * Copyright (c) 2017 Florian Obser <florian@openbsd.org>
@@ -53,42 +53,6 @@
 #include "engine.h"
 #include "control.h"
 
-#ifndef	SMALL
-const char* imsg_type_name[] = {
-	"IMSG_NONE",
-	"IMSG_CTL_LOG_VERBOSE",
-	"IMSG_CTL_SHOW_INTERFACE_INFO",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_RA",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_RA_PREFIX",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_RA_RDNS",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_RA_DNSSL",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_ADDR_PROPOSALS",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_ADDR_PROPOSAL",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_DFR_PROPOSALS",
-	"IMSG_CTL_SHOW_INTERFACE_INFO_DFR_PROPOSAL",
-	"IMSG_CTL_END",
-	"IMSG_UPDATE_ADDRESS",
-	"IMSG_CTL_SEND_SOLICITATION",
-	"IMSG_SOCKET_IPC",
-	"IMSG_ICMP6SOCK",
-	"IMSG_ROUTESOCK",
-	"IMSG_CONTROLFD",
-	"IMSG_STARTUP",
-	"IMSG_STARTUP_DONE",
-	"IMSG_UPDATE_IF",
-	"IMSG_REMOVE_IF",
-	"IMSG_RA",
-	"IMSG_PROPOSAL",
-	"IMSG_PROPOSAL_ACK",
-	"IMSG_CONFIGURE_ADDRESS",
-	"IMSG_DEL_ADDRESS",
-	"IMSG_DEL_ROUTE",
-	"IMSG_FAKE_ACK",
-	"IMSG_CONFIGURE_DFR",
-	"IMSG_WITHDRAW_DFR",
-};
-#endif	/* SMALL */
-
 __dead void	usage(void);
 __dead void	main_shutdown(void);
 
@@ -116,11 +80,7 @@ struct imsgev		*iev_engine;
 pid_t	 frontend_pid;
 pid_t	 engine_pid;
 
-int	 routesock, ioctl_sock;
-
-char	*csock;
-
-int	 rtm_seq = 0;
+int	 routesock, ioctl_sock, rtm_seq = 0;
 
 void
 main_sig_handler(int sig, short event, void *arg)
@@ -165,11 +125,10 @@ main(int argc, char *argv[])
 	int			 pipe_main2engine[2];
 	int			 icmp6sock, on = 1;
 	int			 frontend_routesock, rtfilter;
+	char			*csock = SLAACD_SOCKET;
 #ifndef SMALL
 	int			 control_fd;
 #endif /* SMALL */
-
-	csock = SLAACD_SOCKET;
 
 	log_init(1, LOG_DAEMON);	/* Log to stderr until daemonized. */
 	log_setverbose(1);
@@ -222,7 +181,7 @@ main(int argc, char *argv[])
 	log_setverbose(verbose);
 
 	if (!debug)
-		daemon(1, 0);
+		daemon(0, 0);
 
 	log_info("startup");
 
@@ -244,8 +203,9 @@ main(int argc, char *argv[])
 	log_procinit(log_procnames[slaacd_process]);
 
 	if ((routesock = socket(PF_ROUTE, SOCK_RAW | SOCK_CLOEXEC |
-	    SOCK_NONBLOCK, 0)) < 0)
+	    SOCK_NONBLOCK, AF_INET6)) < 0)
 		fatal("route socket");
+	shutdown(SHUT_RD, routesock);
 
 	event_init();
 
@@ -304,13 +264,13 @@ main(int argc, char *argv[])
 	    sizeof(filt)) == -1)
 		fatal("ICMP6_FILTER");
 
-	if ((frontend_routesock = socket(PF_ROUTE, SOCK_RAW | SOCK_CLOEXEC, 0))
-	    < 0)
+	if ((frontend_routesock = socket(PF_ROUTE, SOCK_RAW | SOCK_CLOEXEC,
+	    AF_INET6)) < 0)
 		fatal("route socket");
 
 	rtfilter = ROUTE_FILTER(RTM_IFINFO) | ROUTE_FILTER(RTM_NEWADDR) |
 	    ROUTE_FILTER(RTM_DELADDR) | ROUTE_FILTER(RTM_PROPOSAL) |
-	    ROUTE_FILTER(RTM_DELETE);
+	    ROUTE_FILTER(RTM_DELETE) | ROUTE_FILTER(RTM_CHGADDRATTR);
 	if (setsockopt(frontend_routesock, PF_ROUTE, ROUTE_MSGFILTER,
 	    &rtfilter, sizeof(rtfilter)) < 0)
 		fatal("setsockopt(ROUTE_MSGFILTER)");
@@ -320,11 +280,8 @@ main(int argc, char *argv[])
 		fatalx("control socket setup failed");
 #endif /* SMALL */
 
-#if 0
-	/* XXX ioctl SIOCAIFADDR_IN6 */
-BROKEN	if (pledge("stdio cpath sendfd", NULL) == -1)
+	if (pledge("stdio sendfd wroute", NULL) == -1)
 		fatal("pledge");
-#endif
 
 	main_imsg_compose_frontend_fd(IMSG_ICMP6SOCK, 0, icmp6sock);
 
@@ -369,10 +326,6 @@ main_shutdown(void)
 	free(iev_frontend);
 	free(iev_engine);
 
-#ifndef	SMALL
-	control_cleanup(csock);
-#endif	/* SMALL */
-
 	log_info("terminating");
 	exit(0);
 }
@@ -380,7 +333,7 @@ main_shutdown(void)
 static pid_t
 start_child(int p, char *argv0, int fd, int debug, int verbose)
 {
-	char	*argv[8];
+	char	*argv[7];
 	int	 argc = 0;
 	pid_t	 pid;
 
@@ -431,6 +384,7 @@ main_dispatch_frontend(int fd, short event, void *bula)
 	int			 shut = 0;
 #ifndef	SMALL
 	struct imsg_addrinfo	 imsg_addrinfo;
+	struct imsg_link_state	 imsg_link_state;
 	int			 verbose;
 #endif	/* SMALL */
 
@@ -457,11 +411,8 @@ main_dispatch_frontend(int fd, short event, void *bula)
 
 		switch (imsg.hdr.type) {
 		case IMSG_STARTUP_DONE:
-#if 0
-			/* XXX ioctl SIOCAIFADDR_IN6 */
-BROKEN			if (pledge("stdio cpath", NULL) == -1)
+			if (pledge("stdio wroute", NULL) == -1)
 				fatal("pledge");
-#endif
 			break;
 #ifndef	SMALL
 		case IMSG_CTL_LOG_VERBOSE:
@@ -478,6 +429,16 @@ BROKEN			if (pledge("stdio cpath", NULL) == -1)
 			    sizeof(imsg_addrinfo));
 			main_imsg_compose_engine(IMSG_UPDATE_ADDRESS, 0,
 			    &imsg_addrinfo, sizeof(imsg_addrinfo));
+			break;
+		case IMSG_UPDATE_LINK_STATE:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(imsg_link_state))
+				fatal("%s: IMSG_UPDATE_LINK_STATE wrong "
+				    "length: %d", __func__, imsg.hdr.len);
+			memcpy(&imsg_link_state, imsg.data,
+			    sizeof(imsg_link_state));
+			main_imsg_compose_engine(IMSG_UPDATE_LINK_STATE, 0,
+			    &imsg_link_state, sizeof(imsg_link_state));
 			break;
 #endif	/* SMALL */
 		case IMSG_UPDATE_IF:
@@ -791,6 +752,18 @@ configure_interface(struct imsg_configure_address *address)
 
 	if (ioctl(ioctl_sock, SIOCAIFADDR_IN6, &in6_addreq) < 0)
 		fatal("SIOCAIFADDR_IN6");
+
+	if (address->mtu) {
+		struct ifreq	 ifr;
+
+		(void)strlcpy(ifr.ifr_name, in6_addreq.ifra_name,
+		    sizeof(ifr.ifr_name));
+		ifr.ifr_mtu = address->mtu;
+		log_debug("Setting MTU to %d", ifr.ifr_mtu);
+
+		if (ioctl(ioctl_sock, SIOCSIFMTU, &ifr) < 0)
+		    log_warn("failed to set MTU");
+	}
 }
 
 void

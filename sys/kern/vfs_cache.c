@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_cache.c,v 1.55 2018/05/02 02:24:56 visa Exp $	*/
+/*	$OpenBSD: vfs_cache.c,v 1.57 2018/06/04 19:42:54 kn Exp $	*/
 /*	$NetBSD: vfs_cache.c,v 1.13 1996/02/04 02:18:09 christos Exp $	*/
 
 /*
@@ -128,9 +128,7 @@ cache_zap(struct namecache *ncp)
 }
 
 /*
- * Look for a name in the cache. We don't do this if the segment name is
- * long, simply so the cache can avoid holding long names (which would
- * either waste space, or add greatly to the complexity).
+ * Look for a name in the cache.
  * dvp points to the directory to search. The componentname cnp holds
  * the information on the entry being sought, such as its length
  * and its name. If the lookup succeeds, vpp is set to point to the vnode
@@ -145,7 +143,6 @@ cache_lookup(struct vnode *dvp, struct vnode **vpp,
 	struct namecache *ncp;
 	struct namecache n;
 	struct vnode *vp;
-	struct proc *p = curproc;
 	u_long vpid;
 	int error;
 
@@ -211,7 +208,7 @@ cache_lookup(struct vnode *dvp, struct vnode **vpp,
 	} else if (cnp->cn_flags & ISDOTDOT) {
 		VOP_UNLOCK(dvp);
 		cnp->cn_flags |= PDIRUNLOCK;
-		error = vget(vp, LK_EXCLUSIVE, p);
+		error = vget(vp, LK_EXCLUSIVE);
 		/*
 		 * If the above vget() succeeded and both LOCKPARENT and
 		 * ISLASTCN is set, lock the directory vnode as well.
@@ -224,7 +221,7 @@ cache_lookup(struct vnode *dvp, struct vnode **vpp,
 			cnp->cn_flags &= ~PDIRUNLOCK;
 		}
 	} else {
-		error = vget(vp, LK_EXCLUSIVE, p);
+		error = vget(vp, LK_EXCLUSIVE);
 		/*
 		 * If the above vget() failed or either of LOCKPARENT or
 		 * ISLASTCN is set, unlock the directory vnode.

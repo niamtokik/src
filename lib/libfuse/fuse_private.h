@@ -1,4 +1,4 @@
-/* $OpenBSD: fuse_private.h,v 1.18 2018/05/16 13:09:17 helg Exp $ */
+/* $OpenBSD: fuse_private.h,v 1.22 2018/11/16 02:16:17 tedu Exp $ */
 /*
  * Copyright (c) 2013 Sylvestre Gallon <ccna.syl@gmail.com>
  *
@@ -41,7 +41,7 @@ struct fuse_vnode {
 	SIMPLEQ_ENTRY(fuse_vnode) node; /* for dict */
 };
 
-typedef struct fuse_dirhandle {
+struct fuse_dirhandle {
 	struct fuse *fuse;
 	fuse_fill_dir_t filler;
 	void *buf;
@@ -50,7 +50,7 @@ typedef struct fuse_dirhandle {
 	uint32_t start;
 	uint32_t idx;
 	off_t off;
-} *fuse_dirh_t;
+};
 
 SIMPLEQ_HEAD(fuse_vn_head, fuse_vnode);
 SPLAY_HEAD(dict, dictentry);
@@ -69,7 +69,6 @@ struct fuse_chan {
 
 	/* kqueue stuff */
 	int kq;
-	struct kevent event;
 };
 
 struct fuse_config {
@@ -80,6 +79,7 @@ struct fuse_config {
 	int			set_mode;
 	int			set_uid;
 	int			set_gid;
+	int			use_ino;
 };
 
 struct fuse_core_opts {
@@ -89,6 +89,7 @@ struct fuse_core_opts {
 
 struct fuse_mount_opts {
 	char			*fsname;
+	int			allow_other;
 	int			def_perms;
 	int			max_read;
 	int			noatime;

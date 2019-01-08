@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_lock.c,v 1.64 2018/05/14 12:31:21 mpi Exp $	*/
+/*	$OpenBSD: kern_lock.c,v 1.66 2018/06/15 13:59:53 visa Exp $	*/
 
 /*
  * Copyright (c) 2017 Visa Hankala
@@ -27,11 +27,6 @@
 
 #include <ddb/db_output.h>
 
-#if defined(MULTIPROCESSOR) || defined(WITNESS)
-#include <sys/mplock.h>
-struct __mp_lock kernel_lock;
-#endif
-
 #ifdef MP_LOCKDEBUG
 #ifndef DDB
 #error "MP_LOCKDEBUG requires DDB"
@@ -42,6 +37,9 @@ int __mp_lock_spinout = 200000000;
 #endif /* MP_LOCKDEBUG */
 
 #ifdef MULTIPROCESSOR
+
+#include <sys/mplock.h>
+struct __mp_lock kernel_lock;
 
 /*
  * Functions for manipulating the kernel_lock.  We put them here
@@ -91,7 +89,7 @@ _kernel_lock_held(void)
 #include <machine/cpu.h>
 
 void
-___mp_lock_init(struct __mp_lock *mpl, struct lock_type *type)
+___mp_lock_init(struct __mp_lock *mpl, const struct lock_type *type)
 {
 	memset(mpl->mpl_cpus, 0, sizeof(mpl->mpl_cpus));
 	mpl->mpl_users = 0;
@@ -374,7 +372,7 @@ __mtx_leave(struct mutex *mtx)
 #ifdef WITNESS
 void
 _mtx_init_flags(struct mutex *m, int ipl, const char *name, int flags,
-    struct lock_type *type)
+    const struct lock_type *type)
 {
 	struct lock_object *lo = MUTEX_LOCK_OBJECT(m);
 

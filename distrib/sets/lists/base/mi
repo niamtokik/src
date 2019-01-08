@@ -75,6 +75,7 @@
 ./etc/examples/ospfd.conf
 ./etc/examples/pf.conf
 ./etc/examples/printcap
+./etc/examples/rad.conf
 ./etc/examples/radiusd.conf
 ./etc/examples/rbootd.conf
 ./etc/examples/rc.local
@@ -174,6 +175,7 @@
 ./etc/rc.d/ospfd
 ./etc/rc.d/pflogd
 ./etc/rc.d/portmap
+./etc/rc.d/rad
 ./etc/rc.d/radiusd
 ./etc/rc.d/rarpd
 ./etc/rc.d/rbootd
@@ -182,7 +184,6 @@
 ./etc/rc.d/relayd
 ./etc/rc.d/ripd
 ./etc/rc.d/route6d
-./etc/rc.d/rtadvd
 ./etc/rc.d/sasyncd
 ./etc/rc.d/sensorsd
 ./etc/rc.d/slaacd
@@ -210,14 +211,6 @@
 ./etc/rpc
 ./etc/services
 ./etc/signify
-./etc/signify/openbsd-61-base.pub
-./etc/signify/openbsd-61-fw.pub
-./etc/signify/openbsd-61-pkg.pub
-./etc/signify/openbsd-61-syspatch.pub
-./etc/signify/openbsd-62-base.pub
-./etc/signify/openbsd-62-fw.pub
-./etc/signify/openbsd-62-pkg.pub
-./etc/signify/openbsd-62-syspatch.pub
 ./etc/signify/openbsd-63-base.pub
 ./etc/signify/openbsd-63-fw.pub
 ./etc/signify/openbsd-63-pkg.pub
@@ -226,6 +219,10 @@
 ./etc/signify/openbsd-64-fw.pub
 ./etc/signify/openbsd-64-pkg.pub
 ./etc/signify/openbsd-64-syspatch.pub
+./etc/signify/openbsd-65-base.pub
+./etc/signify/openbsd-65-fw.pub
+./etc/signify/openbsd-65-pkg.pub
+./etc/signify/openbsd-65-syspatch.pub
 ./etc/skel
 ./etc/skel/.ssh
 ./etc/ssh
@@ -329,6 +326,7 @@
 ./usr/bin/bc
 ./usr/bin/bgplgsh
 ./usr/bin/biff
+./usr/bin/c++
 ./usr/bin/c2ph
 ./usr/bin/cal
 ./usr/bin/calendar
@@ -425,6 +423,7 @@
 ./usr/bin/last
 ./usr/bin/lastcomm
 ./usr/bin/ld
+./usr/bin/ldap
 ./usr/bin/ldd
 ./usr/bin/leave
 ./usr/bin/less
@@ -454,7 +453,7 @@
 ./usr/bin/merge
 ./usr/bin/mesg
 ./usr/bin/mg
-./usr/bin/midiplay
+./usr/bin/midicat
 ./usr/bin/mixerctl
 ./usr/bin/mkdep
 ./usr/bin/mklocale
@@ -621,8 +620,8 @@
 ./usr/games
 ./usr/include
 ./usr/lib
-./usr/lib/libc.so.92.3
-./usr/lib/libcrypto.so.43.1
+./usr/lib/libc.so.93.0
+./usr/lib/libcrypto.so.45.1
 ./usr/lib/libcurses.so.14.0
 ./usr/lib/libedit.so.5.2
 ./usr/lib/libevent.so.4.1
@@ -648,10 +647,10 @@
 ./usr/lib/librpcsvc.so.2.0
 ./usr/lib/libskey.so.6.0
 ./usr/lib/libsndio.so.7.0
-./usr/lib/libssl.so.45.1
+./usr/lib/libssl.so.47.1
 ./usr/lib/libtermcap.so.14.0
 ./usr/lib/libtermlib.so.14.0
-./usr/lib/libtls.so.17.1
+./usr/lib/libtls.so.19.2
 ./usr/lib/libusbhid.so.7.0
 ./usr/lib/libutil.so.13.0
 ./usr/lib/libz.so.5.0
@@ -1050,7 +1049,9 @@
 ./usr/libdata/perl5/OpenBSD/ArcCheck.pm
 ./usr/libdata/perl5/OpenBSD/CollisionReport.pm
 ./usr/libdata/perl5/OpenBSD/Delete.pm
+./usr/libdata/perl5/OpenBSD/Dependencies
 ./usr/libdata/perl5/OpenBSD/Dependencies.pm
+./usr/libdata/perl5/OpenBSD/Dependencies/SolverBase.pm
 ./usr/libdata/perl5/OpenBSD/Error.pm
 ./usr/libdata/perl5/OpenBSD/ForwardDependencies.pm
 ./usr/libdata/perl5/OpenBSD/FwUpdate.pm
@@ -2185,6 +2186,7 @@
 ./usr/libexec/auth/login_token
 ./usr/libexec/auth/login_yubikey
 ./usr/libexec/comsat
+./usr/libexec/cpp
 ./usr/libexec/cvs
 ./usr/libexec/cvs/contrib
 ./usr/libexec/cvs/contrib/clmerge
@@ -2213,7 +2215,11 @@
 ./usr/libexec/lockspool
 ./usr/libexec/lpr
 ./usr/libexec/lpr/lpf
+./usr/libexec/mail.lmtp
 ./usr/libexec/mail.local
+./usr/libexec/mail.maildir
+./usr/libexec/mail.mboxfile
+./usr/libexec/mail.mda
 ./usr/libexec/makewhatis
 ./usr/libexec/ntalkd
 ./usr/libexec/radiusd
@@ -2451,6 +2457,8 @@
 ./usr/sbin/quot
 ./usr/sbin/quotaoff
 ./usr/sbin/quotaon
+./usr/sbin/ractl
+./usr/sbin/rad
 ./usr/sbin/radiusctl
 ./usr/sbin/radiusd
 ./usr/sbin/rarpd
@@ -2471,7 +2479,6 @@
 ./usr/sbin/rpc.bootparamd
 ./usr/sbin/rpc.lockd
 ./usr/sbin/rpc.statd
-./usr/sbin/rtadvd
 ./usr/sbin/sa
 ./usr/sbin/sasyncd
 ./usr/sbin/sendmail
@@ -2670,6 +2677,7 @@
 ./usr/share/misc/license.template
 ./usr/share/misc/mail.help
 ./usr/share/misc/mail.tildehelp
+./usr/share/misc/mandoc.css
 ./usr/share/misc/mdoc.template
 ./usr/share/misc/mime.types
 ./usr/share/misc/more.help
@@ -2701,8 +2709,8 @@
 ./usr/share/relink/kernel.tgz
 ./usr/share/relink/usr
 ./usr/share/relink/usr/lib
-./usr/share/relink/usr/lib/libc.so.92.3.a
-./usr/share/relink/usr/lib/libcrypto.so.43.1.a
+./usr/share/relink/usr/lib/libc.so.93.0.a
+./usr/share/relink/usr/lib/libcrypto.so.45.1.a
 ./usr/share/relink/usr/libexec
 ./usr/share/relink/usr/libexec/ld.so.a
 ./usr/share/snmp
@@ -5800,6 +5808,7 @@
 ./usr/share/zoneinfo/Asia/Pontianak
 ./usr/share/zoneinfo/Asia/Pyongyang
 ./usr/share/zoneinfo/Asia/Qatar
+./usr/share/zoneinfo/Asia/Qostanay
 ./usr/share/zoneinfo/Asia/Qyzylorda
 ./usr/share/zoneinfo/Asia/Rangoon
 ./usr/share/zoneinfo/Asia/Riyadh
@@ -6414,6 +6423,7 @@
 ./usr/share/zoneinfo/posix/Asia/Pontianak
 ./usr/share/zoneinfo/posix/Asia/Pyongyang
 ./usr/share/zoneinfo/posix/Asia/Qatar
+./usr/share/zoneinfo/posix/Asia/Qostanay
 ./usr/share/zoneinfo/posix/Asia/Qyzylorda
 ./usr/share/zoneinfo/posix/Asia/Rangoon
 ./usr/share/zoneinfo/posix/Asia/Riyadh
@@ -7029,6 +7039,7 @@
 ./usr/share/zoneinfo/right/Asia/Pontianak
 ./usr/share/zoneinfo/right/Asia/Pyongyang
 ./usr/share/zoneinfo/right/Asia/Qatar
+./usr/share/zoneinfo/right/Asia/Qostanay
 ./usr/share/zoneinfo/right/Asia/Qyzylorda
 ./usr/share/zoneinfo/right/Asia/Rangoon
 ./usr/share/zoneinfo/right/Asia/Riyadh

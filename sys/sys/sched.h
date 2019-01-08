@@ -1,4 +1,4 @@
-/*	$OpenBSD: sched.h,v 1.45 2018/05/14 12:31:21 mpi Exp $	*/
+/*	$OpenBSD: sched.h,v 1.50 2018/11/17 23:10:08 cheloha Exp $	*/
 /* $NetBSD: sched.h,v 1.2 1999/02/28 18:14:58 ross Exp $ */
 
 /*-
@@ -113,6 +113,13 @@ struct schedstate_percpu {
 	volatile u_int spc_spinning;	/* this cpu is currently spinning */
 };
 
+struct cpustats {
+	uint64_t	cs_time[CPUSTATES];	/* CPU state statistics */
+	uint64_t	cs_flags;		/* see below */
+};
+
+#define CPUSTATS_ONLINE		0x0001	/* CPU is schedulable */
+
 #ifdef	_KERNEL
 
 /* spc_flags */
@@ -152,6 +159,8 @@ void sched_barrier(struct cpu_info *ci);
 
 int sysctl_hwsetperf(void *, size_t *, void *, size_t);
 int sysctl_hwperfpolicy(void *, size_t *, void *, size_t);
+int sysctl_hwsmt(void *, size_t *, void *, size_t);
+int sysctl_hwncpuonline(void);
 
 #ifdef MULTIPROCESSOR
 void sched_start_secondary_cpus(void);
@@ -159,6 +168,7 @@ void sched_stop_secondary_cpus(void);
 #endif
 
 #define cpu_is_idle(ci)	((ci)->ci_schedstate.spc_whichqs == 0)
+int	cpu_is_online(struct cpu_info *);
 
 void sched_init_runqueues(void);
 void setrunqueue(struct proc *);

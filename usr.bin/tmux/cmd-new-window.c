@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-new-window.c,v 1.74 2018/05/03 16:56:59 nicm Exp $ */
+/* $OpenBSD: cmd-new-window.c,v 1.76 2018/07/15 06:57:13 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -95,17 +95,14 @@ cmd_new_window_exec(struct cmd *self, struct cmdq_item *item)
 
 	if ((tmp = args_get(args, 'c')) != NULL)
 		cwd = format_single(item, tmp, c, s, NULL, NULL);
-	else if (item->client != NULL && item->client->session == NULL)
-		cwd = xstrdup(item->client->cwd);
 	else
-		cwd = xstrdup(s->cwd);
+		cwd = xstrdup(server_client_get_cwd(item->client, s));
 
 	if ((tmp = args_get(args, 'n')) != NULL)
 		name = format_single(item, tmp, c, s, NULL, NULL);
 	else
 		name = NULL;
 
-	wl = NULL;
 	if (idx != -1)
 		wl = winlink_find_by_index(&s->windows, idx);
 	if (wl != NULL && args_has(args, 'k')) {

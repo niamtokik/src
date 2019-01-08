@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.162 2018/04/11 15:44:08 bluhm Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.166 2018/12/05 10:28:21 jsg Exp $	*/
 /*	$NetBSD: cpu.h,v 1.35 1996/05/05 19:29:26 christos Exp $	*/
 
 /*-
@@ -67,6 +67,7 @@
 #include <sys/device.h>
 #include <sys/sched.h>
 #include <sys/sensors.h>
+#include <sys/srp.h>
 
 struct intrsource;
 
@@ -162,6 +163,7 @@ struct cpu_info {
 	u_int32_t	ci_feature_flags;	/* X86 CPUID feature bits */
 	u_int32_t	ci_feature_sefflags_ebx;/* more CPUID feature bits */
 	u_int32_t	ci_feature_sefflags_ecx;/* more CPUID feature bits */
+	u_int32_t	ci_feature_sefflags_edx;/* more CPUID feature bits */
 	u_int32_t	ci_feature_tpmflags;	/* thermal & power bits */
 	u_int32_t	cpu_class;		/* CPU class */
 	u_int32_t	ci_cflushsz;		/* clflush cache-line size */
@@ -184,6 +186,7 @@ struct cpu_info {
 
 	union descriptor *ci_gdt;
 	struct i386tss	*ci_tss;
+	struct i386tss	*ci_nmi_tss;
 
 	volatile int ci_ddb_paused;	/* paused due to other proc in ddb */
 #define CI_DDB_RUNNING		0
@@ -399,6 +402,7 @@ extern int cpu_apmi_edx;
 /* cpu.c */
 extern u_int cpu_mwait_size;
 extern u_int cpu_mwait_states;
+extern void cpu_update_nmi_cr3(vaddr_t);
 
 /* machdep.c */
 extern int cpu_apmhalt;
@@ -507,11 +511,6 @@ int	kvtop(caddr_t);
 /* mp_setperf.c */
 void	mp_setperf_init(void);
 #endif
-
-#ifdef VM86
-/* vm86.c */
-void	vm86_gpfault(struct proc *, int);
-#endif /* VM86 */
 
 int	cpu_paenable(void *);
 #endif /* _KERNEL */

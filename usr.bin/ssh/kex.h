@@ -1,4 +1,4 @@
-/* $OpenBSD: kex.h,v 1.83 2017/05/30 14:23:52 markus Exp $ */
+/* $OpenBSD: kex.h,v 1.93 2018/12/27 03:25:25 djm Exp $ */
 
 /*
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
@@ -27,8 +27,6 @@
 #define KEX_H
 
 #include "mac.h"
-#include "buffer.h" /* XXX for typedef */
-#include "key.h" /* XXX for typedef */
 
 #ifdef WITH_LEAKMALLOC
 #include "leakmalloc.h"
@@ -50,6 +48,7 @@
 #define	KEX_CURVE25519_SHA256_OLD	"curve25519-sha256@libssh.org"
 
 #define COMP_NONE	0
+/* pre-auth compression (COMP_ZLIB) is only supported in the client */
 #define COMP_ZLIB	1
 #define COMP_DELAYED	2
 
@@ -89,6 +88,7 @@ enum kex_exchange {
 };
 
 #define KEX_INIT_SENT	0x0001
+#define KEX_INITIAL	0x0002
 
 struct sshenc {
 	char	*name;
@@ -125,16 +125,16 @@ struct kex {
 	int	hostkey_type;
 	int	hostkey_nid;
 	u_int	kex_type;
-	int	rsa_sha2;
+	char	*server_sig_algs;
 	int	ext_info_c;
 	struct sshbuf *my;
 	struct sshbuf *peer;
+	struct sshbuf *client_version;
+	struct sshbuf *server_version;
 	sig_atomic_t done;
 	u_int	flags;
 	int	hash_alg;
 	int	ec_nid;
-	char	*client_version_string;
-	char	*server_version_string;
 	char	*failed_choice;
 	int	(*verify_host_key)(struct sshkey *, struct ssh *);
 	struct sshkey *(*load_host_public_key)(int, int, struct ssh *);
@@ -155,9 +155,12 @@ struct kex {
 int	 kex_names_valid(const char *);
 char	*kex_alg_list(char);
 char	*kex_names_cat(const char *, const char *);
-int	 kex_assemble_names(const char *, char **);
+int	 kex_assemble_names(char **, const char *, const char *);
 
-int	 kex_new(struct ssh *, char *[PROPOSAL_MAX], struct kex **);
+int	 kex_exchange_identification(struct ssh *, int, const char *);
+
+struct kex *kex_new(void);
+int	 kex_ready(struct ssh *, char *[PROPOSAL_MAX]);
 int	 kex_setup(struct ssh *, char *[PROPOSAL_MAX]);
 void	 kex_free_newkeys(struct newkeys *);
 void	 kex_free(struct kex *);
@@ -183,22 +186,23 @@ int	 kexecdh_server(struct ssh *);
 int	 kexc25519_client(struct ssh *);
 int	 kexc25519_server(struct ssh *);
 
-int	 kex_dh_hash(int, const char *, const char *,
+int	 kex_dh_hash(int, const struct sshbuf *, const struct sshbuf *,
     const u_char *, size_t, const u_char *, size_t, const u_char *, size_t,
     const BIGNUM *, const BIGNUM *, const BIGNUM *, u_char *, size_t *);
 
-int	 kexgex_hash(int, const char *, const char *,
+int	 kexgex_hash(int, const struct sshbuf *, const struct sshbuf *,
     const u_char *, size_t, const u_char *, size_t, const u_char *, size_t,
     int, int, int,
     const BIGNUM *, const BIGNUM *, const BIGNUM *,
     const BIGNUM *, const BIGNUM *,
     u_char *, size_t *);
 
-int kex_ecdh_hash(int, const EC_GROUP *, const char *, const char *,
+int kex_ecdh_hash(int, const EC_GROUP *,
+    const struct sshbuf *, const struct sshbuf *,
     const u_char *, size_t, const u_char *, size_t, const u_char *, size_t,
     const EC_POINT *, const EC_POINT *, const BIGNUM *, u_char *, size_t *);
 
-int	 kex_c25519_hash(int, const char *, const char *,
+int	 kex_c25519_hash(int, const struct sshbuf *, const struct sshbuf *,
     const u_char *, size_t, const u_char *, size_t,
     const u_char *, size_t, const u_char *, const u_char *,
     const u_char *, size_t, u_char *, size_t *);

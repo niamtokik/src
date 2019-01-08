@@ -1,4 +1,4 @@
-/*	$OpenBSD: ffs_vfsops.c,v 1.176 2018/05/02 02:24:56 visa Exp $	*/
+/*	$OpenBSD: ffs_vfsops.c,v 1.179 2018/09/26 14:51:44 visa Exp $	*/
 /*	$NetBSD: ffs_vfsops.c,v 1.19 1996/02/09 22:22:26 christos Exp $	*/
 
 /*
@@ -177,9 +177,8 @@ ffs_mountroot(void)
 	}
 
 	if ((error = ffs_mountfs(rootvp, mp, p)) != 0) {
-		mp->mnt_vfc->vfc_refcount--;
 		vfs_unbusy(mp);
-		free(mp, M_MOUNT, sizeof(*mp));
+		vfs_mount_free(mp);
 		vrele(swapdev_vp);
 		vrele(rootvp);
 		return (error);
@@ -240,6 +239,16 @@ ffs_mount(struct mount *mp, const char *path, void *data,
 		devvp = ump->um_devvp;
 		error = 0;
 		ronly = fs->fs_ronly;
+
+		/*
+		 * Soft updates won't be set if read/write,
+		 * so "async" will be illegal.
+		 */
+		if (ronly == 0 && (mp->mnt_flag & MNT_ASYNC) &&
+		    (fs->fs_flags & FS_DOSOFTDEP)) {
+			error = EINVAL;
+			goto error_1;
+		}
 
 		if (ronly == 0 && (mp->mnt_flag & MNT_RDONLY)) {
 			/* Flush any dirty data */
@@ -504,7 +513,7 @@ ffs_reload_vnode(struct vnode *vp, void *args)
 	/*
 	 * Step 5: invalidate all cached file data.
 	 */
-	if (vget(vp, LK_EXCLUSIVE, fra->p))
+	if (vget(vp, LK_EXCLUSIVE))
 		return (0);
 
 	if (vinvalbuf(vp, 0, fra->cred, fra->p, 0, 0))
@@ -1179,7 +1188,7 @@ ffs_sync_vnode(struct vnode *vp, void *arg)
 		goto end;
 	}
 
-	if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT, fsa->p)) {
+	if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT)) {
 		nlink0 = 1;		/* potentially.. */
 		goto end;
 	}

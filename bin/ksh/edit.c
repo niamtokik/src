@@ -1,4 +1,4 @@
-/*	$OpenBSD: edit.c,v 1.65 2018/04/09 17:53:36 tobias Exp $	*/
+/*	$OpenBSD: edit.c,v 1.67 2018/12/30 23:09:58 guenther Exp $	*/
 
 /*
  * Command line editing - common code
@@ -12,7 +12,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <libgen.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -138,10 +137,10 @@ x_flush(void)
 	shf_flush(shl_out);
 }
 
-void
+int
 x_putc(int c)
 {
-	shf_putc(c, shl_out);
+	return shf_putc(c, shl_out);
 }
 
 void

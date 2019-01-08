@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211.c,v 1.68 2018/04/28 14:49:07 stsp Exp $	*/
+/*	$OpenBSD: ieee80211.c,v 1.70 2018/09/11 18:16:26 krw Exp $	*/
 /*	$NetBSD: ieee80211.c,v 1.19 2004/06/06 05:45:29 dyoung Exp $	*/
 
 /*-
@@ -64,9 +64,6 @@ int	ieee80211_debug = 0;
 #endif
 
 int ieee80211_cache_size = IEEE80211_CACHE_SIZE;
-
-struct ieee80211com_head ieee80211com_head =
-    LIST_HEAD_INITIALIZER(ieee80211com_head);
 
 void ieee80211_setbasicrates(struct ieee80211com *);
 int ieee80211_findrate(struct ieee80211com *, enum ieee80211_phymode, int);
@@ -184,7 +181,6 @@ ieee80211_ifattach(struct ifnet *ifp)
 	ic->ic_bmissthres = 7;	/* default 7 beacons */
 	ic->ic_dtim_period = 1;	/* all TIMs are DTIMs */
 
-	LIST_INSERT_HEAD(&ieee80211com_head, ic, ic_list);
 	ieee80211_node_attach(ifp);
 	ieee80211_proto_attach(ifp);
 
@@ -205,7 +201,6 @@ ieee80211_ifdetach(struct ifnet *ifp)
 	ieee80211_proto_detach(ifp);
 	ieee80211_crypto_detach(ifp);
 	ieee80211_node_detach(ifp);
-	LIST_REMOVE(ic, ic_list);
 	ifmedia_delete_instance(&ic->ic_media, IFM_INST_ANY);
 	ether_ifdetach(ifp);
 }
@@ -823,7 +818,7 @@ ieee80211_setmode(struct ieee80211com *ic, enum ieee80211_phymode mode)
 	 * channel list before committing to the new mode.
 	 */
 	if (mode >= nitems(chanflags))
-		panic("unexpected mode %u", mode);
+		panic("%s: unexpected mode %u", __func__, mode);
 	modeflags = chanflags[mode];
 	for (i = 0; i <= IEEE80211_CHAN_MAX; i++) {
 		c = &ic->ic_channels[i];
@@ -969,7 +964,7 @@ ieee80211_mcs2media(struct ieee80211com *ic, int mcs,
 	case IEEE80211_MODE_11B:
 	case IEEE80211_MODE_11G:
 		/* these modes use rates, not MCS */
-		panic("unexpected mode %d", mode);
+		panic("%s: unexpected mode %d", __func__, mode);
 		break;
 	case IEEE80211_MODE_AUTO:
 	case IEEE80211_MODE_11N:
@@ -1062,7 +1057,7 @@ ieee80211_rate2media(struct ieee80211com *ic, int rate,
 		break;
 	case IEEE80211_MODE_11N:
 		/* 11n uses MCS, not rates. */
-		panic("unexpected mode %d", mode);
+		panic("%s: unexpected mode %d", __func__, mode);
 		break;
 	}
 	for (i = 0; i < nitems(rates); i++)
@@ -1135,7 +1130,7 @@ ieee80211_rate2plcp(u_int8_t rate, enum ieee80211_phymode mode)
 		case 108:	return 0x0c;
 		}
         } else
-		panic("unexpected mode %u", mode);
+		panic("%s: unexpected mode %u", __func__, mode);
 
 	DPRINTF(("unsupported rate %u\n", rate));
 
@@ -1168,7 +1163,7 @@ ieee80211_plcp2rate(u_int8_t plcp, enum ieee80211_phymode mode)
 		case 0x0c:	return 108;
 		}
 	} else
-		panic("unexpected mode %u", mode);
+		panic("%s: unexpected mode %u", __func__, mode);
 
 	DPRINTF(("unsupported plcp %u\n", plcp));
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: queue_fs.c,v 1.16 2018/05/14 15:23:05 gilles Exp $	*/
+/*	$OpenBSD: queue_fs.c,v 1.18 2018/12/30 23:09:58 guenther Exp $	*/
 
 /*
  * Copyright (c) 2011 Gilles Chehade <gilles@poolp.org>
@@ -32,7 +32,6 @@
 #include <fts.h>
 #include <imsg.h>
 #include <inttypes.h>
-#include <libgen.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -561,7 +560,7 @@ fsqueue_qwalk_new(void)
 	char * const	 path_argv[] = { path, NULL };
 	struct qwalk	*q;
 
-	q = xcalloc(1, sizeof(*q), "fsqueue_qwalk_new");
+	q = xcalloc(1, sizeof(*q));
 	(void)strlcpy(path, PATH_QUEUE, sizeof(path));
 	q->fts = fts_open(path_argv,
 	    FTS_PHYSICAL | FTS_NOCHDIR, NULL);

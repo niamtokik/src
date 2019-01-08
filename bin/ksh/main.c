@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.92 2018/05/18 13:25:20 benno Exp $	*/
+/*	$OpenBSD: main.c,v 1.96 2018/11/20 07:02:23 martijn Exp $	*/
 
 /*
  * startup, main loop, environments and error handling
@@ -81,7 +81,7 @@ static const char initsubs[] = "${PS2=> } ${PS3=#? } ${PS4=+ }";
 
 static const char *initcoms [] = {
 	"typeset", "-r", "KSH_VERSION", NULL,
-	"typeset", "-x", "SHELL", "PATH", "HOME", NULL,
+	"typeset", "-x", "SHELL", "PATH", "HOME", "PWD", "OLDPWD", NULL,
 	"typeset", "-ir", "PPID", NULL,
 	"typeset", "-i", "OPTIND=1", NULL,
 	"eval", "typeset -i RANDOM MAILCHECK=\"${MAILCHECK-600}\" SECONDS=\"${SECONDS-0}\" TMOUT=\"${TMOUT-0}\"", NULL,
@@ -145,10 +145,18 @@ main(int argc, char *argv[])
 
 	kshname = argv[0];
 
-	if (pledge("stdio rpath wpath cpath fattr flock getpw proc exec tty",
-	    NULL) == -1) {
-		perror("pledge");
-		exit(1);
+	if (issetugid()) { /* could later drop privileges */
+		if (pledge("stdio rpath wpath cpath fattr flock getpw proc "
+		    "exec tty id", NULL) == -1) {
+			perror("pledge");
+			exit(1);
+		}
+	} else {
+		if (pledge("stdio rpath wpath cpath fattr flock getpw proc "
+		    "exec tty", NULL) == -1) {
+			perror("pledge");
+			exit(1);
+		}
 	}
 
 	ainit(&aperm);		/* initialize permanent Area */
@@ -549,6 +557,7 @@ shell(Source *volatile s, volatile int toplevel)
 		case LERROR:
 		case LSHELL:
 			if (interactive) {
+				c_fc_reset();
 				if (i == LINTR)
 					shellf("\n");
 				/* Reset any eof that was read as part of a

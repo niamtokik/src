@@ -1,4 +1,4 @@
-/*	$OpenBSD: ext2fs_vfsops.c,v 1.106 2018/05/02 02:24:56 visa Exp $	*/
+/*	$OpenBSD: ext2fs_vfsops.c,v 1.110 2018/09/26 14:51:44 visa Exp $	*/
 /*	$NetBSD: ext2fs_vfsops.c,v 1.1 1997/06/11 09:34:07 bouyer Exp $	*/
 
 /*
@@ -129,9 +129,8 @@ ext2fs_mountroot(void)
 	}
 
 	if ((error = ext2fs_mountfs(rootvp, mp, p)) != 0) {
-		mp->mnt_vfc->vfc_refcount--;
 		vfs_unbusy(mp);
-		free(mp, M_MOUNT, sizeof *mp);
+		vfs_mount_free(mp);
 		vrele(rootvp);
 		return (error);
 	}
@@ -317,7 +316,7 @@ ext2fs_reload_vnode(struct vnode *vp, void *args)
 	/*
 	 * Step 5: invalidate all cached file data.
 	 */
-	if (vget(vp, LK_EXCLUSIVE, era->p))
+	if (vget(vp, LK_EXCLUSIVE))
 		return (0);
 
 	if (vinvalbuf(vp, 0, era->cred, era->p, 0, 0))
@@ -442,7 +441,10 @@ ext2fs_reload(struct mount *mountp, struct ucred *cred, struct proc *p)
 	 * Step 1: invalidate all cached meta-data.
 	 */
 	devvp = VFSTOUFS(mountp)->um_devvp;
-	if (vinvalbuf(devvp, 0, cred, p, 0, 0))
+	vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
+	error = vinvalbuf(devvp, 0, cred, p, 0, 0);
+	VOP_UNLOCK(devvp);
+	if (error != 0)
 		panic("ext2fs_reload: dirty1");
 
 	/*
@@ -504,7 +506,10 @@ ext2fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 		return (error);
 	if (vcount(devvp) > 1 && devvp != rootvp)
 		return (EBUSY);
-	if ((error = vinvalbuf(devvp, V_SAVE, cred, p, 0, 0)) != 0)
+	vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
+	error = vinvalbuf(devvp, V_SAVE, cred, p, 0, 0);
+	VOP_UNLOCK(devvp);
+	if (error != 0)
 		return (error);
 
 	ronly = (mp->mnt_flag & MNT_RDONLY) != 0;
@@ -725,7 +730,7 @@ ext2fs_sync_vnode(struct vnode *vp, void *args)
 		goto end;
 	}
 
-	if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT, esa->p)) {
+	if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT)) {
 		nlink0 = 1;	/* potentially */
 		goto end;
 	}

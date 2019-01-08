@@ -125,6 +125,22 @@ struct nsd_options {
 	/** max qps for whitelisted queries, 0 is nolimit */
 	size_t rrl_whitelist_ratelimit;
 #endif
+	/** if dnstap is enabled */
+	int dnstap_enable;
+	/** dnstap socket path */
+	char* dnstap_socket_path;
+	/** true to send "identity" via dnstap */
+	int dnstap_send_identity;
+	/** true to send "version" via dnstap */
+	int dnstap_send_version;
+	/** dnstap "identity", hostname is used if "". */
+	char* dnstap_identity;
+	/** dnstap "version", package version is used if "". */
+	char* dnstap_version;
+	/** true to log dnstap AUTH_QUERY message events */
+	int dnstap_log_auth_query_messages;
+	/** true to log dnstap AUTH_RESPONSE message events */
+	int dnstap_log_auth_response_messages;
 
 	region_type* region;
 };
@@ -340,6 +356,10 @@ void options_zonestatnames_create(struct nsd_options* opt);
 unsigned getzonestatid(struct nsd_options* opt, struct zone_options* zopt);
 /* create string, same options as zonefile but no chroot changes */
 const char* config_cook_string(struct zone_options* zone, const char* input);
+
+/** check if config for remote control turns on IP-address interface
+ * with certificates or a named pipe without certificates. */
+int options_remote_is_address(struct nsd_options* cfg);
 
 #if defined(HAVE_SSL)
 /* tsig must be inited, adds all keys in options to tsig. */

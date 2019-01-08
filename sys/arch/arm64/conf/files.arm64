@@ -1,4 +1,4 @@
-# $OpenBSD: files.arm64,v 1.21 2018/05/04 16:12:12 visa Exp $
+# $OpenBSD: files.arm64,v 1.26 2018/07/30 10:56:00 kettenis Exp $
 
 maxpartitions	16
 maxusers	2 8 64
@@ -111,24 +111,17 @@ include "dev/sdmmc/files.sdmmc"
 # Machine-independent FDT drivers
 include "dev/fdt/files.fdt"
 
-# Console related stuff
-attach	com at fdt with com_fdt
-file	arch/arm64/dev/com_fdt.c		com_fdt
-
-# ARM PrimeCell PL011 UART
-device	pluart
-attach	pluart at fdt
-file	arch/arm64/dev/pluart.c			pluart
-
 device	ampintc: fdt
 attach	ampintc at fdt
 device	ampintcmsi
 attach	ampintcmsi at fdt
 file	arch/arm64/dev/ampintc.c		ampintc | ampintcmsi
 
-device	agintc
+device	agintc: fdt
 attach	agintc at fdt
-file	arch/arm64/dev/agintc.c			agintc
+device	agintcmsi
+attach	agintcmsi at fdt
+file	arch/arm64/dev/agintc.c			agintc | agintcmsi
 
 device	agtimer
 attach	agtimer at fdt
@@ -145,3 +138,13 @@ file	arch/arm64/dev/bcm2835_dwctwo.c		bcmdwctwo	needs-flag
 device	pciecam: pcibus
 attach	pciecam at fdt
 file	arch/arm64/dev/pciecam.c		pciecam
+
+# ACPI
+include "dev/acpi/files.acpi"
+
+attach	acpi at fdt with acpi_fdt
+file	arch/arm64/arm64/acpi_machdep.c		acpi_fdt
+
+device	acpipci: pcibus
+attach	acpipci at acpi
+file	arch/arm64/dev/acpipci.c		acpipci

@@ -1,4 +1,4 @@
-/*	$OpenBSD: tmpfs_vnops.c,v 1.29 2018/05/02 02:24:56 visa Exp $	*/
+/*	$OpenBSD: tmpfs_vnops.c,v 1.33 2018/10/22 17:31:25 krw Exp $	*/
 /*	$NetBSD: tmpfs_vnops.c,v 1.100 2012/11/05 17:27:39 dholland Exp $	*/
 
 /*
@@ -289,7 +289,7 @@ done:
 out:
 	/*
 	 * If (1) we succeded, (2) found a distinct vnode to return and (3) were
-	 * either explicitely told to keep the parent locked or are in the
+	 * either explicitly told to keep the parent locked or are in the
 	 * middle of a lookup, unlock the parent vnode.
 	 */
 	if ((error == 0 || error == EJUSTRETURN) && /* (1) */
@@ -339,19 +339,15 @@ tmpfs_mknod(void *v)
 	enum vtype vt = vap->va_type;
 	int error;
 
-	if (vt != VBLK && vt != VCHR && vt != VFIFO) {
-		vput(dvp);
+	if (vt != VBLK && vt != VCHR && vt != VFIFO)
 		return EINVAL;
-	}
 
-	/* tmpfs_alloc_file() will unlock 'dvp'. */
 	error = tmpfs_alloc_file(dvp, vpp, vap, cnp, NULL);
-	if (error)
-		return error;
 
-	vput(*vpp);
+	if (error == 0)
+		vput(*vpp);
 
-	return 0;
+	return error;
 }
 
 int
@@ -389,6 +385,7 @@ tmpfs_open(void *v)
 int
 tmpfs_close(void *v)
 {
+#ifdef DIAGNOSTIC
 	struct vop_close_args /* {
 		struct vnode	*a_vp;
 		int		a_fflag;
@@ -397,7 +394,7 @@ tmpfs_close(void *v)
 	struct vnode *vp = ap->a_vp;
 
 	KASSERT(VOP_ISLOCKED(vp));
-
+#endif
 	return 0;
 }
 
@@ -659,6 +656,7 @@ out:
 int
 tmpfs_fsync(void *v)
 {
+#ifdef DIAGNOSTIC
 	struct vop_fsync_args /* {
 		struct vnode *a_vp;
 		struct ucred *a_cred;
@@ -671,6 +669,7 @@ tmpfs_fsync(void *v)
 
 	/* Nothing to do.  Just update. */
 	KASSERT(VOP_ISLOCKED(vp));
+#endif
 	return 0;
 }
 
@@ -850,9 +849,12 @@ tmpfs_mkdir(void *v)
 	struct vnode **vpp = ap->a_vpp;
 	struct componentname *cnp = ap->a_cnp;
 	struct vattr *vap = ap->a_vap;
+	int error;
 
 	KASSERT(vap->va_type == VDIR);
-	return tmpfs_alloc_file(dvp, vpp, vap, cnp, NULL);
+	error = tmpfs_alloc_file(dvp, vpp, vap, cnp, NULL);
+	vput(dvp);
+	return error;
 }
 
 int
@@ -959,6 +961,7 @@ tmpfs_symlink(void *v)
 	vap->va_type = VLNK;
 
 	error = tmpfs_alloc_file(dvp, vpp, vap, cnp, target);
+	vput(dvp);
 	if (error == 0)
 		vput(*vpp);
 

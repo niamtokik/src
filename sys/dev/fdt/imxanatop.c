@@ -1,4 +1,4 @@
-/* $OpenBSD: imxanatop.c,v 1.2 2018/05/16 13:42:35 patrick Exp $ */
+/* $OpenBSD: imxanatop.c,v 1.5 2018/08/30 12:14:30 jsg Exp $ */
 /*
  * Copyright (c) 2016 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -137,15 +137,6 @@ void	imxanatop_attach_regulator(struct imxanatop_softc *, int);
 uint32_t imxanatop_get_voltage(void *);
 int	imxanatop_set_voltage(void *, uint32_t);
 
-uint32_t imxanatop_decode_pll(enum imxanatop_clocks, uint32_t);
-uint32_t imxanatop_get_pll2_pfd(unsigned int);
-uint32_t imxanatop_get_pll3_pfd(unsigned int);
-void	imxanatop_enable_pll_usb1(void);
-void	imxanatop_enable_pll_usb2(void);
-void	imxanatop_enable_pll_enet(void);
-void	imxanatop_enable_enet(void);
-void	imxanatop_enable_sata(void);
-
 int
 imxanatop_match(struct device *parent, void *match, void *aux)
 {
@@ -205,8 +196,10 @@ imxanatop_attach_regulator(struct imxanatop_softc *sc, int node)
 	ir->ir_max_voltage = OF_getpropint(node, "anatop-max-voltage", -1);
 	if (ir->ir_reg_offset == -1 || ir->ir_vol_bit_shift == -1 ||
 	    ir->ir_vol_bit_width == -1 || ir->ir_min_bit_val == -1 ||
-	    ir->ir_min_voltage == -1 || ir->ir_max_voltage == -1)
+	    ir->ir_min_voltage == -1 || ir->ir_max_voltage == -1) {
+		free(ir, M_DEVBUF, sizeof(*ir));
 		return;
+	}
 
 	ir->ir_delay_reg_offset =
 	    OF_getpropint(node, "anatop-delay-reg-offset", 0);
@@ -310,70 +303,4 @@ imxanatop_get_pll3_pfd(unsigned int pfd)
 
 	return imxanatop_decode_pll(USB1_PLL3, HCLK_FREQ) * 18ULL
 	    / ANALOG_PFD_480_PFDx_FRAC(HREAD4(sc, ANALOG_PFD_480), pfd);
-}
-
-void
-imxanatop_enable_pll_enet(void)
-{
-	struct imxanatop_softc *sc = imxanatop_sc;
-	KASSERT(sc != NULL);
-
-	if (HREAD4(sc, ANALOG_PLL_ENET) & ANALOG_PLL_ENET_ENABLE)
-		return;
-
-	HCLR4(sc, ANALOG_PLL_ENET, ANALOG_PLL_ENET_POWERDOWN);
-
-	HSET4(sc, ANALOG_PLL_ENET, ANALOG_PLL_ENET_ENABLE);
-
-	while(!(HREAD4(sc, ANALOG_PLL_ENET) & ANALOG_PLL_ENET_LOCK));
-
-	HCLR4(sc, ANALOG_PLL_ENET, ANALOG_PLL_ENET_BYPASS);
-}
-
-void
-imxanatop_enable_enet(void)
-{
-	struct imxanatop_softc *sc = imxanatop_sc;
-	KASSERT(sc != NULL);
-
-	imxanatop_enable_pll_enet();
-	HWRITE4(sc, ANALOG_PLL_ENET_SET, ANALOG_PLL_ENET_DIV_125M);
-}
-
-void
-imxanatop_enable_sata(void)
-{
-	struct imxanatop_softc *sc = imxanatop_sc;
-	KASSERT(sc != NULL);
-
-	imxanatop_enable_pll_enet();
-	HWRITE4(sc, ANALOG_PLL_ENET_SET, ANALOG_PLL_ENET_100M_SATA);
-}
-
-void
-imxanatop_enable_pll_usb1(void)
-{
-	struct imxanatop_softc *sc = imxanatop_sc;
-	KASSERT(sc != NULL);
-
-	HWRITE4(sc, ANALOG_PLL_USB1_CLR, ANALOG_PLL_USB1_BYPASS);
-
-	HWRITE4(sc, ANALOG_PLL_USB1_SET,
-	      ANALOG_PLL_USB1_ENABLE
-	    | ANALOG_PLL_USB1_POWER
-	    | ANALOG_PLL_USB1_EN_USB_CLKS);
-}
-
-void
-imxanatop_enable_pll_usb2(void)
-{
-	struct imxanatop_softc *sc = imxanatop_sc;
-	KASSERT(sc != NULL);
-
-	HWRITE4(sc, ANALOG_PLL_USB2_CLR, ANALOG_PLL_USB2_BYPASS);
-
-	HWRITE4(sc, ANALOG_PLL_USB2_SET,
-	      ANALOG_PLL_USB2_ENABLE
-	    | ANALOG_PLL_USB2_POWER
-	    | ANALOG_PLL_USB2_EN_USB_CLKS);
 }

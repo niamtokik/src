@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpc.c,v 1.2 2018/04/26 21:19:46 eric Exp $	*/
+/*	$OpenBSD: smtpc.c,v 1.4 2018/09/20 11:42:28 eric Exp $	*/
 
 /*
  * Copyright (c) 2018 Eric Faurot <eric@openbsd.org>
@@ -62,7 +62,6 @@ int
 main(int argc, char **argv)
 {
 	char hostname[256];
-	struct smtp_client *conn;
 	int ch, i;
 	char *server = "localhost";
 	struct passwd *pw;
@@ -159,7 +158,7 @@ parse_server(char *server)
 {
 	struct addrinfo hints;
 	char *scheme, *creds, *host, *port, *p, *c;
-	int error, portno;
+	int error;
 
 	creds = NULL;
 	host = NULL;
@@ -205,7 +204,15 @@ parse_server(char *server)
 	if (port && port[0] == '\0')
 		port = NULL;
 
-	params.auth = creds;
+	if (creds) {
+		p = strchr(creds, ':');
+		if (p == NULL)
+			fatalx("invalid credentials");
+		*p = '\0';
+
+		params.auth_user = creds;
+		params.auth_pass = p + 1;
+	}
 	params.tls_req = TLS_YES;
 
 	if (!strcmp(scheme, "lmtp")) {

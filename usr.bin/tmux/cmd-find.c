@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-find.c,v 1.64 2018/05/09 07:50:03 nicm Exp $ */
+/* $OpenBSD: cmd-find.c,v 1.68 2018/08/18 20:08:52 nicm Exp $ */
 
 /*
  * Copyright (c) 2015 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -35,6 +35,7 @@ static int	cmd_find_best_winlink_with_window(struct cmd_find_state *);
 
 static const char *cmd_find_map_table(const char *[][2], const char *);
 
+static void	cmd_find_log_state(const char *, struct cmd_find_state *);
 static int	cmd_find_get_session(struct cmd_find_state *, const char *);
 static int	cmd_find_get_window(struct cmd_find_state *, const char *, int);
 static int	cmd_find_get_window_with_session(struct cmd_find_state *,
@@ -112,7 +113,7 @@ cmd_find_inside_pane(struct client *c)
 		return (NULL);
 
 	RB_FOREACH(wp, window_pane_tree, &all_window_panes) {
-		if (strcmp(wp->tty, c->ttyname) == 0)
+		if (wp->fd != -1 && strcmp(wp->tty, c->ttyname) == 0)
 			break;
 	}
 	if (wp != NULL)
@@ -135,7 +136,7 @@ cmd_find_best_client(struct session *s)
 {
 	struct client	*c_loop, *c;
 
-	if (s->flags & SESSION_UNATTACHED)
+	if (s->attached == 0)
 		s = NULL;
 
 	c = NULL;
@@ -159,10 +160,10 @@ cmd_find_session_better(struct session *s, struct session *than, int flags)
 	if (than == NULL)
 		return (1);
 	if (flags & CMD_FIND_PREFER_UNATTACHED) {
-		attached = (~than->flags & SESSION_UNATTACHED);
-		if (attached && (s->flags & SESSION_UNATTACHED))
+		attached = (than->attached != 0);
+		if (attached && s->attached == 0)
 			return (1);
-		else if (!attached && (~s->flags & SESSION_UNATTACHED))
+		else if (!attached && s->attached != 0)
 			return (0);
 	}
 	return (timercmp(&s->activity_time, &than->activity_time, >));
@@ -223,7 +224,7 @@ fail:
 }
 
 /*
- * Find the best winlink for a window (the current if it contains the pane,
+ * Find the best winlink for a window (the current if it contains the window,
  * otherwise the first).
  */
 static int
@@ -716,7 +717,7 @@ cmd_find_copy_state(struct cmd_find_state *dst, struct cmd_find_state *src)
 }
 
 /* Log the result. */
-void
+static void
 cmd_find_log_state(const char *prefix, struct cmd_find_state *fs)
 {
 	if (fs->s != NULL)
@@ -919,6 +920,9 @@ cmd_find_from_client(struct cmd_find_state *fs, struct client *c, int flags)
 
 			cmd_find_log_state(__func__, fs);
 			return (0);
+		} else {
+			log_debug("%s: session $%u does not have pane %%%u",
+			    __func__, s->id, wp->id);
 		}
 	}
 

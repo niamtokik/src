@@ -356,8 +356,8 @@ static int amd64obsd_tf_reg_offset[] =
   2 * 8,			/* %rdx */
   1 * 8,			/* %rsi */
   0 * 8,			/* %rdi */
-  20 * 8,			/* %rbp */
-  24 * 8,			/* %rsp */
+  16 * 8,			/* %rbp */
+  20 * 8,			/* %rsp */
   4 * 8,			/* %r8 ... */
   5 * 8,
   6 * 8,
@@ -366,14 +366,10 @@ static int amd64obsd_tf_reg_offset[] =
   9 * 8,
   10 * 8,
   11 * 8,			/* ... %r15 */
-  21 * 8,			/* %rip */
-  23 * 8,			/* %eflags */
-  22 * 8,			/* %cs */
-  25 * 8,			/* %ss */
-  18 * 8,			/* %ds */
-  17 * 8,			/* %es */
-  16 * 8,			/* %fs */
-  15 * 8			/* %gs */
+  17 * 8,			/* %rip */
+  19 * 8,			/* %rflags */
+  18 * 8,			/* %cs */
+  21 * 8,			/* %ss */
 };
 
 
@@ -383,7 +379,6 @@ amd64obsd_trapframe_cache(struct frame_info *next_frame, void **this_cache)
   struct trad_frame_cache *cache;
   CORE_ADDR func, sp, addr;
   ULONGEST cs;
-  char *name;
   int i;
 
   if (*this_cache)
@@ -394,16 +389,7 @@ amd64obsd_trapframe_cache(struct frame_info *next_frame, void **this_cache)
 
   func = frame_func_unwind (next_frame);
   sp = frame_unwind_register_unsigned (next_frame, AMD64_RSP_REGNUM);
-
-  find_pc_partial_function (func, &name, NULL, NULL);
-  if (name && ((strncmp(name, "Xintr", 5) == 0)
-	       || (strncmp (name, "Xresume", 7) == 0)
-	       || (strncmp (name, "Xrecurse", 8) == 0)
-	       || (strcmp (name, "Xdoreti") == 0)
-	       || (strncmp (name, "Xsoft", 5) == 0)))
-    addr = sp + 8;		/* It's an interrupt frame.  */
-  else
-    addr = sp;
+  addr = sp;
 
   for (i = 0; i < ARRAY_SIZE (amd64obsd_tf_reg_offset); i++)
     if (amd64obsd_tf_reg_offset[i] != -1)

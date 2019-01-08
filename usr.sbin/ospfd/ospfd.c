@@ -1,4 +1,4 @@
-/*	$OpenBSD: ospfd.c,v 1.97 2018/02/11 02:27:33 benno Exp $ */
+/*	$OpenBSD: ospfd.c,v 1.103 2019/01/02 18:47:59 remi Exp $ */
 
 /*
  * Copyright (c) 2005 Claudio Jeker <claudio@openbsd.org>
@@ -115,15 +115,14 @@ main(int argc, char *argv[])
 	int			 ipforwarding;
 	int			 mib[4];
 	size_t			 len;
-	char			*sockname;
+	char			*sockname = NULL;
+	int			 control_fd;
 
 	conffile = CONF_FILE;
 	ospfd_process = PROC_MAIN;
-	sockname = OSPFD_SOCKET;
 
 	log_init(1, LOG_DAEMON);	/* log to stderr until daemonized */
 	log_procinit(log_procnames[ospfd_process]);
-	log_setverbose(1);
 
 	while ((ch = getopt(argc, argv, "cdD:f:ns:v")) != -1) {
 		switch (ch) {
@@ -151,6 +150,7 @@ main(int argc, char *argv[])
 			if (opts & OSPFD_OPT_VERBOSE)
 				opts |= OSPFD_OPT_VERBOSE2;
 			opts |= OSPFD_OPT_VERBOSE;
+			log_setverbose(1);
 			break;
 		default:
 			usage();
@@ -185,6 +185,13 @@ main(int argc, char *argv[])
 		kif_clear();
 		exit(1);
 	}
+
+	if (sockname == NULL) {
+		if (asprintf(&sockname, "%s.%d", OSPFD_SOCKET,
+		    ospfd_conf->rdomain) == -1)
+			err(1, "asprintf");
+	}
+
 	ospfd_conf->csock = sockname;
 
 	if (ospfd_conf->opts & OSPFD_OPT_NOACTION) {
@@ -206,6 +213,9 @@ main(int argc, char *argv[])
 
 	log_init(debug, LOG_DAEMON);
 	log_setverbose(ospfd_conf->opts & OSPFD_OPT_VERBOSE);
+
+	if ((control_check(ospfd_conf->csock)) == -1)
+		fatalx("control socket check failed");
 
 	if (!debug)
 		daemon(1, 0);
@@ -264,8 +274,20 @@ main(int argc, char *argv[])
 	    iev_rde->handler, iev_rde);
 	event_add(&iev_rde->ev, NULL);
 
+	if ((control_fd = control_init(ospfd_conf->csock)) == -1)
+		fatalx("control socket setup failed");
+	main_imsg_compose_ospfe_fd(IMSG_CONTROLFD, 0, control_fd);
+
+	if (unveil("/", "r") == -1)
+		fatal("unveil");
+	if (unveil(ospfd_conf->csock, "c") == -1)
+		fatal("unveil");
+	if (unveil(NULL, NULL) == -1)
+		fatal("unveil");
+
 	if (kr_init(!(ospfd_conf->flags & OSPFD_FLAG_NO_FIB_UPDATE),
-	    ospfd_conf->rdomain, ospfd_conf->redist_label_or_prefix) == -1)
+	    ospfd_conf->rdomain, ospfd_conf->redist_label_or_prefix,
+	    ospfd_conf->fib_priority) == -1)
 		fatalx("kr_init failed");
 
 	/* remove unneeded stuff from config */
@@ -480,6 +502,13 @@ main_imsg_compose_ospfe(int type, pid_t pid, void *data, u_int16_t datalen)
 }
 
 void
+main_imsg_compose_ospfe_fd(int type, pid_t pid, int fd)
+{
+	if (iev_ospfe)
+		imsg_compose_event(iev_ospfe, type, 0, pid, fd, NULL, 0);
+}
+
+void
 main_imsg_compose_rde(int type, pid_t pid, void *data, u_int16_t datalen)
 {
 	if (iev_rde)
@@ -679,6 +708,15 @@ merge_config(struct ospfd_conf *conf, struct ospfd_conf *xconf)
 			SIMPLEQ_REMOVE_HEAD(&xconf->redist_list, entry);
 			SIMPLEQ_INSERT_TAIL(&conf->redist_list, r, entry);
 		}
+
+		/* adjust FIB priority if changed */
+		if (conf->fib_priority != xconf->fib_priority) {
+			kr_fib_decouple();
+			kr_fib_update_prio(xconf->fib_priority);
+			conf->fib_priority = xconf->fib_priority;
+			kr_fib_couple();
+		}
+
 		goto done;
 	}
 
@@ -789,7 +827,7 @@ merge_interfaces(struct area *a, struct area *xa)
 
 	/* problems:
 	 * - new interfaces (easy)
-	 * - deleted interfaces (needs to be done via fsm?)
+	 * - deleted interfaces
 	 * - changing passive (painful?)
 	 */
 	for (i = LIST_FIRST(&a->iface_list); i != NULL; i = ni) {
@@ -804,6 +842,7 @@ merge_interfaces(struct area *a, struct area *xa)
 				rde_nbr_iface_del(i);
 			LIST_REMOVE(i, entry);
 			if_del(i);
+			dirty = 1; /* force rtr LSA update */
 		}
 	}
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sysctl.c,v 1.337 2018/05/16 14:53:43 visa Exp $	*/
+/*	$OpenBSD: kern_sysctl.c,v 1.352 2018/11/19 16:12:06 tedu Exp $	*/
 /*	$NetBSD: kern_sysctl.c,v 1.17 1996/05/20 17:49:05 mrg Exp $	*/
 
 /*-
@@ -113,6 +113,8 @@
 #include <sys/shm.h>
 #endif
 
+#include "audio.h"
+
 extern struct forkstat forkstat;
 extern struct nchstats nchstats;
 extern int nselcoll, fscale;
@@ -120,6 +122,9 @@ extern struct disklist_head disklist;
 extern fixpt_t ccpu;
 extern  long numvnodes;
 extern u_int net_livelocks;
+#if NAUDIO > 0
+extern int audio_record_enable;
+#endif
 
 int allowkmem;
 
@@ -134,6 +139,10 @@ int sysctl_proc_vmmap(int *, u_int, void *, size_t *, struct proc *);
 int sysctl_intrcnt(int *, u_int, void *, size_t *);
 int sysctl_sensors(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_cptime2(int *, u_int, void *, size_t *, void *, size_t);
+#if NAUDIO > 0
+int sysctl_audio(int *, u_int, void *, size_t *, void *, size_t);
+#endif
+int sysctl_cpustats(int *, u_int, void *, size_t *, void *, size_t);
 
 void fill_file(struct kinfo_file *, struct file *, struct filedesc *, int,
     struct vnode *, struct process *, struct proc *, struct socket *, int);
@@ -302,6 +311,8 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		case KERN_TIMECOUNTER:
 		case KERN_CPTIME2:
 		case KERN_FILE:
+		case KERN_AUDIO:
+		case KERN_CPUSTATS:
 			break;
 		default:
 			return (ENOTDIR);	/* overloaded */
@@ -641,20 +652,18 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return sysctl_int(oldp, oldlenp, newp, newlen, &global_ptrace);
 	}
 #endif
-	case KERN_DNSJACKPORT: {
-		extern uint16_t dnsjackport;
-		int port = dnsjackport;
-		if ((error = sysctl_int(oldp, oldlenp, newp, newlen, &port)))
-			return error;
-		if (port < 0 || port > USHRT_MAX)
-			return EINVAL;
-		dnsjackport = port;
-		return 0;
-	}
 #ifdef WITNESS
 	case KERN_WITNESSWATCH:
 		return witness_sysctl_watch(oldp, oldlenp, newp, newlen);
 #endif
+#if NAUDIO > 0
+	case KERN_AUDIO:
+		return (sysctl_audio(name + 1, namelen - 1, oldp, oldlenp,
+		    newp, newlen));
+#endif
+	case KERN_CPUSTATS:
+		return (sysctl_cpustats(name + 1, namelen - 1, oldp, oldlenp,
+		    newp, newlen));
 	default:
 		return (EOPNOTSUPP);
 	}
@@ -687,6 +696,9 @@ hw_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (sysctl_rdint(oldp, oldlenp, newp, ncpus));
 	case HW_NCPUFOUND:
 		return (sysctl_rdint(oldp, oldlenp, newp, ncpusfound));
+	case HW_NCPUONLINE:
+		return (sysctl_rdint(oldp, oldlenp, newp,
+		    sysctl_hwncpuonline()));
 	case HW_BYTEORDER:
 		return (sysctl_rdint(oldp, oldlenp, newp, BYTE_ORDER));
 	case HW_PHYSMEM:
@@ -768,6 +780,10 @@ hw_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			    allowpowerdown));
 		return (sysctl_int(oldp, oldlenp, newp, newlen,
 		    &allowpowerdown));
+#ifdef __HAVE_CPU_TOPOLOGY
+	case HW_SMT:
+		return (sysctl_hwsmt(oldp, oldlenp, newp, newlen));
+#endif
 	default:
 		return (EOPNOTSUPP);
 	}
@@ -1244,8 +1260,11 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 		kf->p_tid = -1;
 		strlcpy(kf->p_comm, pr->ps_comm, sizeof(kf->p_comm));
 	}
-	if (fdp != NULL)
+	if (fdp != NULL) {
+		fdplock(fdp);
 		kf->fd_ofileflags = fdp->fd_ofileflags[fd];
+		fdpunlock(fdp);
+	}
 }
 
 /*
@@ -1305,10 +1324,6 @@ sysctl_file(int *name, u_int namelen, char *where, size_t *sizep,
 	case KERN_FILE_BYFILE:
 		/* use the inp-tables to pick up closed connections, too */
 		if (arg == DTYPE_SOCKET) {
-			extern struct inpcbtable rawcbtable;
-#ifdef INET6
-			extern struct inpcbtable rawin6pcbtable;
-#endif
 			struct inpcb *inp;
 
 			NET_LOCK();
@@ -2341,7 +2356,6 @@ sysctl_sensors(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	free(us, M_TEMP, sizeof(*us));
 	return (ret);
 }
-
 #endif	/* SMALL_KERNEL */
 
 int
@@ -2367,4 +2381,48 @@ sysctl_cptime2(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	return (sysctl_rdstruct(oldp, oldlenp, newp,
 	    &ci->ci_schedstate.spc_cp_time,
 	    sizeof(ci->ci_schedstate.spc_cp_time)));
+}
+
+#if NAUDIO > 0
+int
+sysctl_audio(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+    void *newp, size_t newlen)
+{
+	if (namelen != 1)
+		return (ENOTDIR);
+
+	if (name[0] != KERN_AUDIO_RECORD)
+		return (ENOENT);
+
+	return (sysctl_int(oldp, oldlenp, newp, newlen, &audio_record_enable));
+}
+#endif
+
+int
+sysctl_cpustats(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+    void *newp, size_t newlen)
+{
+	CPU_INFO_ITERATOR cii;
+	struct cpustats cs;
+	struct cpu_info *ci;
+	int found = 0;
+
+	if (namelen != 1)
+		return (ENOTDIR);
+
+	CPU_INFO_FOREACH(cii, ci) {
+		if (name[0] == CPU_INFO_UNIT(ci)) {
+			found = 1;
+			break;
+		}
+	}
+	if (!found)
+		return (ENOENT);
+
+	memcpy(&cs.cs_time, &ci->ci_schedstate.spc_cp_time, sizeof(cs.cs_time));
+	cs.cs_flags = 0;
+	if (cpu_is_online(ci))
+		cs.cs_flags |= CPUSTATS_ONLINE;
+
+	return (sysctl_rdstruct(oldp, oldlenp, newp, &cs, sizeof(cs)));
 }

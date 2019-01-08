@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu_full.h,v 1.1 2018/04/11 15:44:08 bluhm Exp $	*/
+/*	$OpenBSD: cpu_full.h,v 1.3 2018/06/22 13:21:14 bluhm Exp $	*/
 /*
  * Copyright (c) 2018 Philip Guenther <guenther@openbsd.org>
  * Copyright (c) 2018 Hans-Joerg Hoexer <hshoexer@genua.de>
@@ -26,14 +26,21 @@
 struct cpu_info_full {
 	/* page mapped kRO in u-k */
 	union {
-		struct i386tss		u_tss; /* followed by gdt */
-		char			u_align[PAGE_SIZE];
+		struct {
+			struct i386tss		uu_tss;
+			struct i386tss		uu_nmi_tss;
+			union descriptor	uu_gdt[NGDT];
+		} u_tssgdt;
+	char			u_align[PAGE_SIZE];
 	} cif_TSS_RO;
-#define cif_tss cif_TSS_RO.u_tss
+#define cif_tss cif_TSS_RO.u_tssgdt.uu_tss
+#define cif_nmi_tss cif_TSS_RO.u_tssgdt.uu_nmi_tss
+#define cif_gdt cif_TSS_RO.u_tssgdt.uu_gdt
 
 	/* start of page mapped kRW in u-k */
-	uint32_t cif_tramp_stack[(PAGE_SIZE
+	uint32_t cif_tramp_stack[(PAGE_SIZE / 4
 	    - offsetof(struct cpu_info, ci_PAGEALIGN)) / sizeof(uint32_t)];
+	uint32_t cif_nmi_stack[(3 * PAGE_SIZE / 4) / sizeof(uint32_t)];
 
 	/*
 	 * Beginning of this hangs over into the kRW page; rest is
@@ -42,11 +49,8 @@ struct cpu_info_full {
 	struct cpu_info cif_cpu;
 } __aligned(PAGE_SIZE);
 
-/* idt and align shim must fit exactly in a page */
-CTASSERT(_ALIGN(sizeof(struct gate_descriptor) * NIDT) <= PAGE_SIZE);
-
 /* tss, align shim, and gdt must fit in a page */
-CTASSERT(_ALIGN(sizeof(struct i386tss)) +
+CTASSERT(_ALIGN(2 * sizeof(struct i386tss)) +
 	sizeof(struct segment_descriptor) * NGDT < PAGE_SIZE);
 
 /* verify expected alignment */

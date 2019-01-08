@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpctl.c,v 1.160 2018/05/14 15:23:05 gilles Exp $	*/
+/*	$OpenBSD: smtpctl.c,v 1.162 2018/05/31 21:06:12 gilles Exp $	*/
 
 /*
  * Copyright (c) 2013 Eric Faurot <eric@openbsd.org>
@@ -126,7 +126,7 @@ srv_connect(void)
 		return (0);
 	}
 
-	ibuf = xcalloc(1, sizeof(struct imsgbuf), "smtpctl:srv_connect");
+	ibuf = xcalloc(1, sizeof(struct imsgbuf));
 	imsg_init(ibuf, ctl_sock);
 
 	return (1);
@@ -1212,7 +1212,7 @@ show_queue_envelope(struct envelope *e, int online)
 	    e->dest.user, e->dest.domain,
 
 	    (size_t) e->creation,
-	    (size_t) (e->creation + e->expire),
+	    (size_t) (e->creation + e->ttl),
 	    (size_t) e->lasttry,
 	    (size_t) e->retry,
 	    runstate,

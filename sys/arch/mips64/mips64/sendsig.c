@@ -1,4 +1,4 @@
-/*	$OpenBSD: sendsig.c,v 1.28 2018/04/12 17:13:43 deraadt Exp $ */
+/*	$OpenBSD: sendsig.c,v 1.30 2018/07/10 04:19:59 guenther Exp $ */
 
 /*
  * Copyright (c) 1990 The Regents of the University of California.
@@ -88,20 +88,11 @@ struct sigframe {
 	siginfo_t sf_si;
 };
 
-#ifdef DEBUG
-int sigdebug = 0;
-pid_t sigpid = 0;
-#define SDB_FOLLOW	0x01
-#define SDB_KSTACK	0x02
-#define SDB_FPSTATE	0x04
-#endif
-
 /*
  * Send an interrupt to process.
  */
 void
-sendsig(sig_t catcher, int sig, int mask, u_long code, int type,
-    union sigval val)
+sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 {
 	struct cpu_info *ci = curcpu();
 	struct proc *p = curproc;
@@ -147,10 +138,7 @@ sendsig(sig_t catcher, int sig, int mask, u_long code, int type,
 	}
 
 	if (psp->ps_siginfo & sigmask(sig)) {
-		siginfo_t si;
-
-		initsiginfo(&si, sig, code, type, val);
-		if (copyout((caddr_t)&si, (caddr_t)&fp->sf_si, sizeof si))
+		if (copyout(ksip, (caddr_t)&fp->sf_si, sizeof *ksip))
 			goto bail;
 	}
 

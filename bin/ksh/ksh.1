@@ -1,8 +1,8 @@
-.\"	$OpenBSD: ksh.1,v 1.199 2018/05/18 13:25:20 benno Exp $
+.\"	$OpenBSD: ksh.1,v 1.202 2018/12/16 13:08:35 schwarze Exp $
 .\"
 .\"	Public Domain
 .\"
-.Dd $Mdocdate: May 18 2018 $
+.Dd $Mdocdate: December 16 2018 $
 .Dt KSH 1
 .Os
 .Sh NAME
@@ -540,7 +540,7 @@ if no
 .Ar list
 is executed, the exit status is zero.
 .It Xo Ic for Ar name
-.Oo Cm in Ar word No ... Oc ;
+.Op Cm in Op Ar word ... ;
 .Cm do Ar list ; Cm done
 .Xc
 For each
@@ -564,10 +564,10 @@ e.g.\&
 The exit status of a
 .Ic for
 statement is the last exit status of
-.Ar list ;
-if
+.Ar list .
+If there are no items,
 .Ar list
-is never executed, the exit status is zero.
+is not executed and the exit status is zero.
 .It Xo Ic if Ar list ;
 .Cm then Ar list ;
 .Oo Cm elif Ar list ;
@@ -1717,6 +1717,10 @@ loops to store the value that is read from standard input.
 The number of seconds since the shell started or, if the parameter has been
 assigned an integer value, the number of seconds since the assignment plus the
 value that was assigned.
+.It Ev TERM
+The user's terminal type.
+If set, it will be used to determine the escape sequence used to
+clear the screen.
 .It Ev TMOUT
 If set to a positive integer in an interactive shell, it specifies the maximum
 number of seconds the shell will wait for input after printing the primary
@@ -4075,8 +4079,8 @@ A command that exits with a zero value.
 .Pp
 .It Ic type
 Short form of
-.Ic whence Fl v
-(see below).
+.Ic command Fl V
+(see above).
 .Pp
 .It Xo
 .Ic typeset
@@ -4690,6 +4694,11 @@ Moves the cursor to the beginning of the edited input line.
 Uppercase the first character in the next
 .Ar n
 words, leaving the cursor past the end of the last word.
+.It clear-screen:
+Clears the screen if the
+.Ev TERM
+parameter is set and the terminal supports clearing the screen, then
+reprints the prompt string and the current input line.
 .It comment: ^[#
 If the current line does not begin with a comment character, one is added at
 the beginning of the line and the line is entered (as if return had been

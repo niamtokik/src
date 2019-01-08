@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.242 2018/04/26 12:47:02 guenther Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.251 2018/11/05 15:13:56 kn Exp $	*/
 /*	$NetBSD: machdep.c,v 1.3 2003/05/07 22:58:18 fvdl Exp $	*/
 
 /*-
@@ -212,12 +212,6 @@ struct uvm_constraint_range *uvm_md_constraints[] = {
     NULL,
 };
 
-#ifdef DEBUG
-int sigdebug = 0;
-pid_t sigpid = 0;
-#define SDB_FOLLOW      0x01
-#endif
-
 paddr_t avail_start;
 paddr_t avail_end;
 
@@ -351,6 +345,8 @@ void
 enter_shared_special_pages(void)
 {
 	extern char __kutext_start[], __kutext_end[], __kernel_kutext_phys[];
+	extern char __text_page_start[], __text_page_end[];
+	extern char __kernel_kutext_page_phys[];
 	extern char __kudata_start[], __kudata_end[], __kernel_kudata_phys[];
 	vaddr_t va;
 	paddr_t pa;
@@ -366,6 +362,17 @@ enter_shared_special_pages(void)
 	while (va < (vaddr_t)__kutext_end) {
 		pmap_enter_special(va, pa, PROT_READ | PROT_EXEC);
 		DPRINTF("%s: entered kutext page va 0x%llx pa 0x%llx\n",
+		    __func__, (uint64_t)va, (uint64_t)pa);
+		va += PAGE_SIZE;
+		pa += PAGE_SIZE;
+	}
+
+	/* .kutext.page section */
+	va = (vaddr_t)__text_page_start;
+	pa = (paddr_t)__kernel_kutext_page_phys;
+	while (va < (vaddr_t)__text_page_end) {
+		pmap_enter_special(va, pa, PROT_READ | PROT_EXEC);
+		DPRINTF("%s: entered kutext.page va 0x%llx pa 0x%llx\n",
 		    __func__, (uint64_t)va, (uint64_t)pa);
 		va += PAGE_SIZE;
 		pa += PAGE_SIZE;
@@ -392,7 +399,6 @@ x86_64_proc0_tss_ldt_init(void)
 	struct pcb *pcb;
 
 	cpu_info_primary.ci_curpcb = pcb = &proc0.p_addr->u_pcb;
-	pcb->pcb_cr0 = rcr0();
 	pcb->pcb_fsbase = 0;
 	pcb->pcb_kstack = (u_int64_t)proc0.p_addr + USPACE - 16;
 	proc0.p_md.md_regs = (struct trapframe *)pcb->pcb_kstack - 1;
@@ -400,20 +406,6 @@ x86_64_proc0_tss_ldt_init(void)
 	ltr(GSYSSEL(GPROC0_SEL, SEL_KPL));
 	lldt(0);
 }
-
-/*       
- * Set up TSS for a new PCB.
- */         
-         
-#ifdef MULTIPROCESSOR
-void    
-x86_64_init_pcb_tss_ldt(struct cpu_info *ci)   
-{
-	struct pcb *pcb = ci->ci_idle_pcb;
- 
-	pcb->pcb_cr0 = rcr0();
-}
-#endif	/* MULTIPROCESSOR */
 
 bios_diskinfo_t *
 bios_getdiskinfo(dev_t dev)
@@ -567,22 +559,19 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 /*
  * Send an interrupt to process.
  *
- * Stack is set up to allow sigcode stored
- * in u. to call routine, followed by kcall
- * to sigreturn routine below.  After sigreturn
- * resets the signal mask, the stack, and the
- * frame pointer, it returns to the user
- * specified pc, psl.
+ * Stack is set up to allow sigcode to call routine, followed by
+ * syscall to sigreturn routine below.  After sigreturn resets the
+ * signal mask, the stack, and the frame pointer, it returns to the
+ * user specified pc.
  */
 void
-sendsig(sig_t catcher, int sig, int mask, u_long code, int type,
-    union sigval val)
+sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 {
 	struct proc *p = curproc;
 	struct trapframe *tf = p->p_md.md_regs;
 	struct sigacts *psp = p->p_p->ps_sigacts;
 	struct sigcontext ksc;
-	siginfo_t ksi;
+	struct savefpu *sfp = &p->p_addr->u_pcb.pcb_savefpu;
 	register_t sp, scp, sip;
 	u_long sss;
 
@@ -619,25 +608,26 @@ sendsig(sig_t catcher, int sig, int mask, u_long code, int type,
 	sp &= ~15ULL;	/* just in case */
 	sss = (sizeof(ksc) + 15) & ~15;
 
-	if (p->p_md.md_flags & MDP_USEDFPU) {
-		fpusave_proc(p, 1);
-		sp -= fpu_save_len;
-		ksc.sc_fpstate = (struct fxsave64 *)sp;
-		if (copyout(&p->p_addr->u_pcb.pcb_savefpu.fp_fxsave,
-		    (void *)sp, fpu_save_len))
-			sigexit(p, SIGILL);
-
-		/* Signal handlers get a completely clean FP state */
-		p->p_md.md_flags &= ~MDP_USEDFPU;
+	/* Save FPU state to PCB if necessary, then copy it out */
+	if (curcpu()->ci_flags & CPUF_USERXSTATE) {
+		curcpu()->ci_flags &= ~CPUF_USERXSTATE;
+		fpusavereset(&p->p_addr->u_pcb.pcb_savefpu);
 	}
+	sp -= fpu_save_len;
+	ksc.sc_fpstate = (struct fxsave64 *)sp;
+	if (copyout(sfp, (void *)sp, fpu_save_len))
+		sigexit(p, SIGILL);
+
+	/* Now reset the FPU state in PCB */
+	memcpy(&p->p_addr->u_pcb.pcb_savefpu,
+	    &proc0.p_addr->u_pcb.pcb_savefpu, fpu_save_len);
 
 	sip = 0;
 	if (psp->ps_siginfo & sigmask(sig)) {
-		sip = sp - ((sizeof(ksi) + 15) & ~15);
-		sss += (sizeof(ksi) + 15) & ~15;
+		sip = sp - ((sizeof(*ksip) + 15) & ~15);
+		sss += (sizeof(*ksip) + 15) & ~15;
 
-		initsiginfo(&ksi, sig, code, type, val);
-		if (copyout(&ksi, (void *)sip, sizeof(ksi)))
+		if (copyout(ksip, (void *)sip, sizeof(*ksip)))
 			sigexit(p, SIGILL);
 	}
 	scp = sp - sss;
@@ -659,6 +649,9 @@ sendsig(sig_t catcher, int sig, int mask, u_long code, int type,
 	tf->tf_rflags &= ~(PSL_T|PSL_D|PSL_VM|PSL_AC);
 	tf->tf_rsp = scp;
 	tf->tf_ss = GSEL(GUDATA_SEL, SEL_UPL);
+
+	/* The reset state _is_ the userspace state for this thread now */
+	curcpu()->ci_flags |= CPUF_USERXSTATE;
 }
 
 /*
@@ -703,16 +696,23 @@ sys_sigreturn(struct proc *p, void *v, register_t *retval)
 	    !USERMODE(ksc.sc_cs, ksc.sc_eflags))
 		return (EINVAL);
 
-	if (p->p_md.md_flags & MDP_USEDFPU)
-		fpusave_proc(p, 0);
+	/* Current state is obsolete; toss it and force a reload */
+	if (curcpu()->ci_flags & CPUF_USERXSTATE) {
+		curcpu()->ci_flags &= ~CPUF_USERXSTATE;
+		fpureset();
+	}
 
-	if (ksc.sc_fpstate) {
+	/* Copy in the FPU state to restore */
+	if (__predict_true(ksc.sc_fpstate != NULL)) {
 		struct fxsave64 *fx = &p->p_addr->u_pcb.pcb_savefpu.fp_fxsave;
 
 		if ((error = copyin(ksc.sc_fpstate, fx, fpu_save_len)))
 			return (error);
 		fx->fx_mxcsr &= fpu_mxcsr_mask;
-		p->p_md.md_flags |= MDP_USEDFPU;
+	} else {
+		/* shouldn't happen, but handle it */
+		memcpy(&p->p_addr->u_pcb.pcb_savefpu,
+		    &proc0.p_addr->u_pcb.pcb_savefpu, fpu_save_len);
 	}
 
 	tf->tf_rdi = ksc.sc_rdi;
@@ -746,6 +746,7 @@ sys_sigreturn(struct proc *p, void *v, register_t *retval)
 	 * when a signal was being delivered, the process will be
 	 * completely restored, including the userland %rcx and %r11
 	 * registers which the 'sysretq' instruction cannot restore.
+	 * Also need to make sure we can handle faulting on xrstor.
 	 */
 	p->p_md.md_flags |= MDP_IRET;
 
@@ -1131,10 +1132,19 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 {
 	struct trapframe *tf;
 
-	/* If we were using the FPU, forget about it. */
-	if (p->p_addr->u_pcb.pcb_fpcpu != NULL)
-		fpusave_proc(p, 0);
-	p->p_md.md_flags &= ~MDP_USEDFPU;
+	/* Reset FPU state in PCB */
+	memcpy(&p->p_addr->u_pcb.pcb_savefpu,
+	    &proc0.p_addr->u_pcb.pcb_savefpu, fpu_save_len);
+
+	if (curcpu()->ci_flags & CPUF_USERXSTATE) {
+		/* state in CPU is obsolete; reset it */
+		fpureset();
+	} else {
+		/* the reset state _is_ the userspace state now */
+		curcpu()->ci_flags |= CPUF_USERXSTATE;
+	}
+
+	/* To reset all registers we have to return via iretq */
 	p->p_md.md_flags |= MDP_IRET;
 
 	reset_segs();
@@ -1475,6 +1485,16 @@ init_x86_64(paddr_t first_avail)
 				continue;
 		}
 
+		/*
+		 * The direct map is limited to 512GB of memory, so
+		 * discard anything above that.
+		 */
+		if (e1 >= (uint64_t)512*1024*1024*1024) {
+			e1 = (uint64_t)512*1024*1024*1024;
+			if (s1 > e1)
+				continue;
+		}
+
 		/* Crop stuff into "640K hole" */
 		if (s1 < IOM_BEGIN && e1 > IOM_BEGIN)
 			e1 = IOM_BEGIN;
@@ -1695,7 +1715,7 @@ init_x86_64(paddr_t first_avail)
 
 	softintr_init();
 	splraise(IPL_IPI);
-	enable_intr();
+	intr_enable();
 
 #ifdef DDB
 	db_machine_init();
@@ -1708,8 +1728,7 @@ init_x86_64(paddr_t first_avail)
 void
 cpu_reset(void)
 {
-
-	disable_intr();
+	intr_disable();
 
 	if (cpuresetfn)
 		(*cpuresetfn)();
@@ -1924,9 +1943,9 @@ getbootinfo(char *bootinfo, int bootinfo_size)
 		case BOOTARG_CONSDEV:
 			if (q->ba_size >= sizeof(bios_consdev_t) +
 			    offsetof(struct _boot_args32, ba_arg)) {
+#if NCOM > 0
 				bios_consdev_t *cdp =
 				    (bios_consdev_t*)q->ba_arg;
-#if NCOM > 0
 				static const int ports[] =
 				    { 0x3f8, 0x2f8, 0x3e8, 0x2e8 };
 				int unit = minor(cdp->consdev);

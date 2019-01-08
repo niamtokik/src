@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_socket.c,v 1.37 2018/04/26 10:45:45 pirofti Exp $	*/
+/*	$OpenBSD: sys_socket.c,v 1.42 2018/11/19 13:15:37 visa Exp $	*/
 /*	$NetBSD: sys_socket.c,v 1.13 1995/08/12 23:59:09 mycroft Exp $	*/
 
 /*
@@ -43,6 +43,7 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
+#include <sys/fcntl.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -58,20 +59,27 @@ struct	fileops socketops = {
 };
 
 int
-soo_read(struct file *fp, off_t *poff, struct uio *uio, struct ucred *cred)
+soo_read(struct file *fp, struct uio *uio, int fflags)
 {
+	struct socket *so = (struct socket *)fp->f_data;
+	int flags = 0;
 
-	return (soreceive((struct socket *)fp->f_data, (struct mbuf **)NULL,
-		uio, (struct mbuf **)NULL, (struct mbuf **)NULL, (int *)NULL,
-		(socklen_t)0));
+	if (fp->f_flag & FNONBLOCK)
+		flags |= MSG_DONTWAIT;
+
+	return (soreceive(so, NULL, uio, NULL, NULL, &flags, 0));
 }
 
 int
-soo_write(struct file *fp, off_t *poff, struct uio *uio, struct ucred *cred)
+soo_write(struct file *fp, struct uio *uio, int fflags)
 {
+	struct socket *so = (struct socket *)fp->f_data;
+	int flags = 0;
 
-	return (sosend((struct socket *)fp->f_data, (struct mbuf *)NULL,
-		uio, (struct mbuf *)NULL, (struct mbuf *)NULL, 0));
+	if (fp->f_flag & FNONBLOCK)
+		flags |= MSG_DONTWAIT;
+
+	return (sosend(so, NULL, uio, NULL, NULL, flags));
 }
 
 int
@@ -83,12 +91,6 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 	switch (cmd) {
 
 	case FIONBIO:
-		s = solock(so);
-		if (*(int *)data)
-			so->so_state |= SS_NBIO;
-		else
-			so->so_state &= ~SS_NBIO;
-		sounlock(s);
 		break;
 
 	case FIOASYNC:
@@ -102,21 +104,25 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 			so->so_rcv.sb_flags &= ~SB_ASYNC;
 			so->so_snd.sb_flags &= ~SB_ASYNC;
 		}
-		sounlock(s);
+		sounlock(so, s);
 		break;
 
 	case FIONREAD:
 		*(int *)data = so->so_rcv.sb_datacc;
 		break;
 
+	case TIOCSPGRP:
+		/* FALLTHROUGH */
 	case SIOCSPGRP:
-		so->so_pgid = *(int *)data;
-		so->so_siguid = p->p_ucred->cr_ruid;
-		so->so_sigeuid = p->p_ucred->cr_uid;
+		error = sigio_setown(&so->so_sigio, *(int *)data);
+		break;
+
+	case TIOCGPGRP:
+		*(int *)data = -sigio_getown(&so->so_sigio);
 		break;
 
 	case SIOCGPGRP:
-		*(int *)data = so->so_pgid;
+		*(int *)data = sigio_getown(&so->so_sigio);
 		break;
 
 	case SIOCATMARK:
@@ -176,7 +182,7 @@ soo_poll(struct file *fp, int events, struct proc *p)
 			so->so_snd.sb_flags |= SB_SEL;
 		}
 	}
-	sounlock(s);
+	sounlock(so, s);
 	return (revents);
 }
 
@@ -197,17 +203,19 @@ soo_stat(struct file *fp, struct stat *ub, struct proc *p)
 	ub->st_gid = so->so_egid;
 	(void) ((*so->so_proto->pr_usrreq)(so, PRU_SENSE,
 	    (struct mbuf *)ub, NULL, NULL, p));
-	sounlock(s);
+	sounlock(so, s);
 	return (0);
 }
 
 int
 soo_close(struct file *fp, struct proc *p)
 {
-	int error = 0;
+	int flags, error = 0;
 
-	if (fp->f_data)
-		error = soclose(fp->f_data);
+	if (fp->f_data) {
+		flags = (fp->f_flag & FNONBLOCK) ? MSG_DONTWAIT : 0;
+		error = soclose(fp->f_data, flags);
+	}
 	fp->f_data = 0;
 	return (error);
 }

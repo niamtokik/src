@@ -1,4 +1,4 @@
-/* $OpenBSD: auth2.c,v 1.147 2018/05/11 03:22:55 dtucker Exp $ */
+/* $OpenBSD: auth2.c,v 1.150 2018/09/13 02:08:33 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  *
@@ -40,11 +40,11 @@
 #include "ssh2.h"
 #include "packet.h"
 #include "log.h"
-#include "buffer.h"
+#include "sshbuf.h"
 #include "misc.h"
 #include "servconf.h"
 #include "compat.h"
-#include "key.h"
+#include "sshkey.h"
 #include "hostfile.h"
 #include "auth.h"
 #include "dispatch.h"
@@ -411,11 +411,12 @@ auth2_method_allowed(Authctxt *authctxt, const char *method,
 static char *
 authmethods_get(Authctxt *authctxt)
 {
-	Buffer b;
+	struct sshbuf *b;
 	char *list;
-	u_int i;
+	int i, r;
 
-	buffer_init(&b);
+	if ((b = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
 	for (i = 0; authmethods[i] != NULL; i++) {
 		if (strcmp(authmethods[i]->name, "none") == 0)
 			continue;
@@ -425,14 +426,13 @@ authmethods_get(Authctxt *authctxt)
 		if (!auth2_method_allowed(authctxt, authmethods[i]->name,
 		    NULL))
 			continue;
-		if (buffer_len(&b) > 0)
-			buffer_append(&b, ",", 1);
-		buffer_append(&b, authmethods[i]->name,
-		    strlen(authmethods[i]->name));
+		if ((r = sshbuf_putf(b, "%s%s", sshbuf_len(b) ? "," : "",
+		    authmethods[i]->name)) != 0)
+			fatal("%s: buffer error: %s", __func__, ssh_err(r));
 	}
-	if ((list = sshbuf_dup_string(&b)) == NULL)
+	if ((list = sshbuf_dup_string(b)) == NULL)
 		fatal("%s: sshbuf_dup_string failed", __func__);
-	buffer_free(&b);
+	sshbuf_free(b);
 	return list;
 }
 
@@ -661,7 +661,7 @@ auth2_record_key(Authctxt *authctxt, int authenticated,
 	struct sshkey **tmp, *dup;
 	int r;
 
-	if ((r = sshkey_demote(key, &dup)) != 0)
+	if ((r = sshkey_from_private(key, &dup)) != 0)
 		fatal("%s: copy key: %s", __func__, ssh_err(r));
 	sshkey_free(authctxt->auth_method_key);
 	authctxt->auth_method_key = dup;
@@ -670,7 +670,7 @@ auth2_record_key(Authctxt *authctxt, int authenticated,
 		return;
 
 	/* If authenticated, make sure we don't accept this key again */
-	if ((r = sshkey_demote(key, &dup)) != 0)
+	if ((r = sshkey_from_private(key, &dup)) != 0)
 		fatal("%s: copy key: %s", __func__, ssh_err(r));
 	if (authctxt->nprev_keys >= INT_MAX ||
 	    (tmp = recallocarray(authctxt->prev_keys, authctxt->nprev_keys,

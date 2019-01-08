@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_esp.c,v 1.154 2018/05/09 16:00:28 bluhm Exp $ */
+/*	$OpenBSD: ip_esp.c,v 1.158 2018/08/28 15:15:02 mpi Exp $ */
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -68,9 +68,6 @@
 #include <crypto/xform.h>
 
 #include "bpfilter.h"
-
-void esp_output_cb(struct cryptop *);
-void esp_input_cb(struct cryptop *);
 
 #ifdef ENCDEBUG
 #define DPRINTF(x)	if (encdebug) printf x
@@ -341,6 +338,7 @@ esp_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 	struct tdb_crypto *tc = NULL;
 	int plen, alen, hlen, error;
 	u_int32_t btsx, esn;
+	u_int64_t ibytes;
 #ifdef ENCDEBUG
 	char buf[INET6_ADDRSTRLEN];
 #endif
@@ -418,8 +416,10 @@ esp_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 	}
 
 	/* Update the counters */
-	tdb->tdb_cur_bytes += m->m_pkthdr.len - skip - hlen - alen;
-	espstat_add(esps_ibytes, m->m_pkthdr.len - skip - hlen - alen);
+	ibytes = m->m_pkthdr.len - skip - hlen - alen;
+	tdb->tdb_cur_bytes += ibytes;
+	tdb->tdb_ibytes += ibytes;
+	espstat_add(esps_ibytes, ibytes);
 
 	/* Hard expiration */
 	if ((tdb->tdb_flags & TDBF_BYTES) &&
@@ -492,7 +492,7 @@ esp_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 	crp->crp_ilen = m->m_pkthdr.len; /* Total input length */
 	crp->crp_flags = CRYPTO_F_IMBUF;
 	crp->crp_buf = (caddr_t)m;
-	crp->crp_callback = esp_input_cb;
+	crp->crp_callback = ipsec_input_cb;
 	crp->crp_sid = tdb->tdb_cryptoid;
 	crp->crp_opaque = (caddr_t)tc;
 
@@ -531,58 +531,25 @@ esp_input(struct mbuf *m, struct tdb *tdb, int skip, int protoff)
 /*
  * ESP input callback, called directly by the crypto driver.
  */
-void
-esp_input_cb(struct cryptop *crp)
+int
+esp_input_cb(struct tdb *tdb, struct tdb_crypto *tc, struct mbuf *m, int clen)
 {
 	u_int8_t lastthree[3], aalg[AH_HMAC_MAX_HASHLEN];
 	int hlen, roff, skip, protoff;
-	struct mbuf *m1, *mo, *m;
+	struct mbuf *m1, *mo;
 	struct auth_hash *esph;
-	struct tdb_crypto *tc;
-	struct tdb *tdb;
 	u_int32_t btsx, esn;
 	caddr_t ptr;
 #ifdef ENCDEBUG
 	char buf[INET6_ADDRSTRLEN];
 #endif
 
-	tc = (struct tdb_crypto *) crp->crp_opaque;
 	skip = tc->tc_skip;
 	protoff = tc->tc_protoff;
 
-	m = (struct mbuf *) crp->crp_buf;
-	if (m == NULL) {
-		/* Shouldn't happen... */
-		DPRINTF(("%s: bogus returned buffer from crypto\n", __func__));
-		espstat_inc(esps_crypto);
-		goto droponly;
-	}
-
-	NET_LOCK();
-
-	tdb = gettdb(tc->tc_rdomain, tc->tc_spi, &tc->tc_dst, tc->tc_proto);
-	if (tdb == NULL) {
-		DPRINTF(("%s: TDB is expired while in crypto", __func__));
-		espstat_inc(esps_notdb);
-		goto baddone;
-	}
+	NET_ASSERT_LOCKED();
 
 	esph = (struct auth_hash *) tdb->tdb_authalgxform;
-
-	/* Check for crypto errors */
-	if (crp->crp_etype) {
-		if (crp->crp_etype == EAGAIN) {
-			/* Reset the session ID */
-			if (tdb->tdb_cryptoid != 0)
-				tdb->tdb_cryptoid = crp->crp_sid;
-			NET_UNLOCK();
-			crypto_dispatch(crp);
-			return;
-		}
-		DPRINTF(("%s: crypto error %d\n", __func__, crp->crp_etype));
-		espstat_inc(esps_noxform);
-		goto baddone;
-	}
 
 	/* If authentication was performed, check now. */
 	if (esph != NULL) {
@@ -749,20 +716,15 @@ esp_input_cb(struct cryptop *crp)
 	m_copyback(m, protoff, sizeof(u_int8_t), lastthree + 2, M_NOWAIT);
 
 	/* Release the crypto descriptors */
-	crypto_freereq(crp);
 	free(tc, M_XDATA, 0);
 
 	/* Back to generic IPsec input processing */
-	ipsec_common_input_cb(m, tdb, skip, protoff);
-	NET_UNLOCK();
-	return;
+	return ipsec_common_input_cb(m, tdb, skip, protoff);
 
  baddone:
-	NET_UNLOCK();
- droponly:
 	m_freem(m);
-	crypto_freereq(crp);
 	free(tc, M_XDATA, 0);
+	return -1;
 }
 
 /*
@@ -1005,7 +967,7 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	crp->crp_ilen = m->m_pkthdr.len; /* Total input length. */
 	crp->crp_flags = CRYPTO_F_IMBUF;
 	crp->crp_buf = (caddr_t)m;
-	crp->crp_callback = esp_output_cb;
+	crp->crp_callback = ipsec_output_cb;
 	crp->crp_opaque = (caddr_t)tc;
 	crp->crp_sid = tdb->tdb_cryptoid;
 
@@ -1044,66 +1006,20 @@ esp_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int skip,
 	return error;
 }
 
-/*
- * ESP output callback, called directly by the crypto driver.
- */
-void
-esp_output_cb(struct cryptop *crp)
+int
+esp_output_cb(struct tdb *tdb, struct tdb_crypto *tc, struct mbuf *m, int ilen,
+    int olen)
 {
-	struct tdb_crypto *tc;
-	struct tdb *tdb;
-	struct mbuf *m;
-
-	tc = (struct tdb_crypto *) crp->crp_opaque;
-
-	m = (struct mbuf *) crp->crp_buf;
-	if (m == NULL) {
-		/* Shouldn't happen... */
-		DPRINTF(("%s: bogus returned buffer from crypto\n", __func__));
-		espstat_inc(esps_crypto);
-		goto droponly;
-	}
-
-	NET_LOCK();
-
-	tdb = gettdb(tc->tc_rdomain, tc->tc_spi, &tc->tc_dst, tc->tc_proto);
-	if (tdb == NULL) {
-		DPRINTF(("%s: TDB is expired while in crypto\n", __func__));
-		espstat_inc(esps_notdb);
-		goto baddone;
-	}
-
-	/* Check for crypto errors. */
-	if (crp->crp_etype) {
-		if (crp->crp_etype == EAGAIN) {
-			/* Reset the session ID */
-			if (tdb->tdb_cryptoid != 0)
-				tdb->tdb_cryptoid = crp->crp_sid;
-			NET_UNLOCK();
-			crypto_dispatch(crp);
-			return;
-		}
-		DPRINTF(("%s: crypto error %d\n", __func__, crp->crp_etype));
-		espstat_inc(esps_noxform);
-		goto baddone;
-	}
-
 	/* Release crypto descriptors. */
-	crypto_freereq(crp);
 	free(tc, M_XDATA, 0);
 
 	/* Call the IPsec input callback. */
-	if (ipsp_process_done(m, tdb))
+	if (ipsp_process_done(m, tdb)) {
 		espstat_inc(esps_outfail);
-	NET_UNLOCK();
-	return;
+		return -1;
+	}
 
- baddone:
-	NET_UNLOCK();
- droponly:
-	m_freem(m);
-	crypto_freereq(crp);
-	free(tc, M_XDATA, 0);
+	return 0;
 }
 
 #define SEEN_SIZE	howmany(TDB_REPLAYMAX, 32)

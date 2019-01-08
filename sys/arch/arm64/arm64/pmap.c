@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.c,v 1.52 2018/05/16 09:07:45 kettenis Exp $ */
+/* $OpenBSD: pmap.c,v 1.58 2018/09/12 11:58:28 kettenis Exp $ */
 /*
  * Copyright (c) 2008-2009,2014-2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -960,72 +960,6 @@ pmap_vp_destroy(pmap_t pm)
 	pm->pm_vp.l0 = NULL;
 }
 
-/*
- * Similar to pmap_steal_avail, but operating on vm_physmem since
- * uvm_page_physload() has been called.
- */
-vaddr_t
-pmap_steal_memory(vsize_t size, vaddr_t *start, vaddr_t *end)
-{
-	struct vm_physseg *seg;
-	vaddr_t va;
-	paddr_t pa;
-	int segno;
-	u_int npg;
-
-	size = round_page(size);
-	npg = atop(size);
-
-	for (segno = 0, seg = vm_physmem; segno < vm_nphysseg; segno++, seg++) {
-		if (seg->avail_end - seg->avail_start < npg)
-			continue;
-		/*
-		 * We can only steal at an ``unused'' segment boundary,
-		 * i.e. either at the start or at the end.
-		 */
-		if (seg->avail_start == seg->start ||
-		    seg->avail_end == seg->end)
-			break;
-	}
-	if (segno == vm_nphysseg)
-		va = 0;
-	else {
-		if (seg->avail_start == seg->start) {
-			pa = ptoa(seg->avail_start);
-			seg->avail_start += npg;
-			seg->start += npg;
-		} else {
-			pa = ptoa(seg->avail_end) - size;
-			seg->avail_end -= npg;
-			seg->end -= npg;
-		}
-		/*
-		 * If all the segment has been consumed now, remove it.
-		 * Note that the crash dump code still knows about it
-		 * and will dump it correctly.
-		 */
-		if (seg->start == seg->end) {
-			if (vm_nphysseg-- == 1)
-				panic("pmap_steal_memory: out of memory");
-			while (segno < vm_nphysseg) {
-				seg[0] = seg[1]; /* struct copy */
-				seg++;
-				segno++;
-			}
-		}
-
-		va = (vaddr_t)pa;	/* 1:1 mapping */
-		bzero((void *)va, size);
-	}
-
-	if (start != NULL)
-		*start = VM_MIN_KERNEL_ADDRESS;
-	if (end != NULL)
-		*end = VM_MAX_KERNEL_ADDRESS;
-
-	return (va);
-}
-
 vaddr_t virtual_avail, virtual_end;
 
 static inline uint64_t
@@ -1075,10 +1009,10 @@ pmap_kpted_alloc(void)
 }
 
 /*
- * In pmap_bootstrap() we allocate the page tables for the first 512 MB
+ * In pmap_bootstrap() we allocate the page tables for the first GB
  * of the kernel address space.
  */
-vaddr_t pmap_maxkvaddr = VM_MIN_KERNEL_ADDRESS + 512 * 1024 * 1024;
+vaddr_t pmap_maxkvaddr = VM_MIN_KERNEL_ADDRESS + 1024 * 1024 * 1024;
 
 vaddr_t
 pmap_growkernel(vaddr_t maxkvaddr)
@@ -1490,6 +1424,10 @@ pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot)
 
 	pted->pted_va &= ~PROT_WRITE;
 	pted->pted_pte &= ~PROT_WRITE;
+	if ((prot & PROT_EXEC) == 0) {
+		pted->pted_va &= ~PROT_EXEC;
+		pted->pted_pte &= ~PROT_EXEC;
+	}
 	pmap_pte_update(pted, pl3);
 
 	ttlb_flush(pm, pted->pted_va & ~PAGE_MASK);
@@ -1562,7 +1500,7 @@ pmap_protect(pmap_t pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 	if (prot & (PROT_READ | PROT_EXEC)) {
 		pmap_lock(pm);
 		while (sva < eva) {
-			pmap_page_ro(pm, sva, 0);
+			pmap_page_ro(pm, sva, prot);
 			sva += PAGE_SIZE;
 		}
 		pmap_unlock(pm);
@@ -1603,9 +1541,43 @@ pmap_init(void)
 void
 pmap_proc_iflush(struct process *pr, vaddr_t va, vsize_t len)
 {
-	/* We only need to do anything if it is the current process. */
-	if (pr == curproc->p_p)
+	struct pmap *pm = vm_map_pmap(&pr->ps_vmspace->vm_map);
+	vaddr_t kva = zero_page + cpu_number() * PAGE_SIZE;
+	paddr_t pa;
+	vsize_t clen;
+	vsize_t off;
+
+	/*
+	 * If we're caled for the current processes, we can simply
+	 * flush the data cache to the point of unification and
+	 * invalidate the instruction cache.
+	 */
+	if (pr == curproc->p_p) {
 		cpu_icache_sync_range(va, len);
+		return;
+	}
+
+	/*
+	 * Flush and invalidate through an aliased mapping.  This
+	 * assumes the instruction cache is PIPT.  That is only true
+	 * for some of the hardware we run on.
+	 */
+	while (len > 0) {
+		/* add one to always round up to the next page */
+		clen = round_page(va + 1) - va;
+		if (clen > len)
+			clen = len;
+
+		off = va - trunc_page(va);
+		if (pmap_extract(pm, trunc_page(va), &pa)) {
+			pmap_kenter_pa(kva, pa, PROT_READ|PROT_WRITE);
+			cpu_icache_sync_range(kva + off, clen);
+			pmap_kremove_pg(kva);
+		}
+
+		len -= clen;
+		va += clen;
+	}
 }
 
 void
@@ -2235,33 +2207,45 @@ pmap_map_early(paddr_t spa, psize_t len)
  */
 
 #define NUM_ASID (1 << 16)
-uint64_t pmap_asid[NUM_ASID / 64];
+uint32_t pmap_asid[NUM_ASID / 32];
 
 void
 pmap_allocate_asid(pmap_t pm)
 {
+	uint32_t bits;
 	int asid, bit;
 
-	do {
-		asid = arc4random() & (NUM_ASID - 2);
-		bit = (asid & (64 - 1));
-	} while (asid == 0 || (pmap_asid[asid / 64] & (3ULL << bit)));
+	for (;;) {
+		do {
+			asid = arc4random() & (NUM_ASID - 2);
+			bit = (asid & (32 - 1));
+			bits = pmap_asid[asid / 32];
+		} while (asid == 0 || (bits & (3U << bit)));
 
-	pmap_asid[asid / 64] |= (3ULL << bit);
+		if (atomic_cas_uint(&pmap_asid[asid / 32], bits,
+		    bits | (3U << bit)) == bits)
+			break;
+	}
 	pm->pm_asid = asid;
 }
 
 void
 pmap_free_asid(pmap_t pm)
 {
+	uint32_t bits;
 	int bit;
 
 	KASSERT(pm != curcpu()->ci_curpm);
 	cpu_tlb_flush_asid_all((uint64_t)pm->pm_asid << 48);
 	cpu_tlb_flush_asid_all((uint64_t)(pm->pm_asid | ASID_USER) << 48);
 
-	bit = (pm->pm_asid & (64 - 1));
-	pmap_asid[pm->pm_asid / 64] &= ~(3ULL << bit);
+	bit = (pm->pm_asid & (32 - 1));
+	for (;;) {
+		bits = pmap_asid[pm->pm_asid / 32];
+		if (atomic_cas_uint(&pmap_asid[pm->pm_asid / 32], bits,
+		    bits & ~(3U << bit)) == bits)
+			break;
+	}
 }
 
 void

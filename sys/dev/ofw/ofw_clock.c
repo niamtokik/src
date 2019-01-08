@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofw_clock.c,v 1.9 2018/05/03 10:56:14 patrick Exp $	*/
+/*	$OpenBSD: ofw_clock.c,v 1.11 2018/08/05 21:05:17 kettenis Exp $	*/
 /*
  * Copyright (c) 2016 Mark Kettenis
  *
@@ -97,17 +97,13 @@ clock_set_parent_cells(uint32_t *cells, uint32_t *pcells)
 	struct clock_device *cd;
 	uint32_t phandle = cells[0];
 
-	/* We expect that clocks are on the same handle. */
-	if (phandle != pcells[0])
-		return -1;
-
 	LIST_FOREACH(cd, &clock_devices, cd_list) {
 		if (cd->cd_phandle == phandle)
 			break;
 	}
 
 	if (cd && cd->cd_set_parent)
-		return cd->cd_set_parent(cd->cd_cookie, &cells[1], &pcells[1]);
+		return cd->cd_set_parent(cd->cd_cookie, &cells[1], pcells);
 
 	return -1;
 }
@@ -315,7 +311,7 @@ clock_set_assigned(int node)
 	}
 
 	while (clock && clock < clocks + (clen / sizeof(uint32_t))) {
-		if (parent && parent < parent + (plen / sizeof(uint32_t)))
+		if (parent && parent < parents + (plen / sizeof(uint32_t)))
 			if (*parent != 0)
 				clock_set_parent_cells(clock, parent);
 

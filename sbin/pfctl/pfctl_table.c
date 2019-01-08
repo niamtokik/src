@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfctl_table.c,v 1.77 2017/08/11 22:30:38 benno Exp $ */
+/*	$OpenBSD: pfctl_table.c,v 1.79 2019/01/02 23:08:00 kn Exp $ */
 
 /*
  * Copyright (c) 2002 Cedric Berger
@@ -54,8 +54,6 @@
 #include "pfctl.h"
 
 extern void	usage(void);
-static int	pfctl_table(int, char *[], char *, const char *, char *,
-		    const char *, int);
 static void	print_table(struct pfr_table *, int, int);
 static void	print_tstats(struct pfr_tstats *, int);
 static int	load_addr(struct pfr_buffer *, int, char *[], char *, int, int);
@@ -114,15 +112,6 @@ pfctl_show_tables(const char *anchor, int opts)
 {
 	if (pfctl_table(0, NULL, NULL, "-s", NULL, anchor, opts) == -1)
 		exit(1);
-}
-
-int
-pfctl_command_tables(int argc, char *argv[], char *tname,
-    const char *command, char *file, const char *anchor, int opts)
-{
-	if (tname == NULL || command == NULL)
-		usage();
-	return pfctl_table(argc, argv, tname, command, file, anchor, opts);
 }
 
 int
@@ -209,7 +198,8 @@ pfctl_table(int argc, char *argv[], char *tname, const char *command,
 		xprintf(opts, "%d/%d addresses added", nadd, b.pfrb_size);
 		if (opts & PF_OPT_VERBOSE)
 			PFRB_FOREACH(a, &b)
-				if ((opts & PF_OPT_VERBOSE2) || a->pfra_fback)
+				if (opts & PF_OPT_VERBOSE2 ||
+				    a->pfra_fback != PFR_FB_NONE)
 					print_addrx(a, NULL,
 					    opts & PF_OPT_USEDNS);
 	} else if (!strcmp(command, "delete")) {
@@ -223,7 +213,8 @@ pfctl_table(int argc, char *argv[], char *tname, const char *command,
 		xprintf(opts, "%d/%d addresses deleted", ndel, b.pfrb_size);
 		if (opts & PF_OPT_VERBOSE)
 			PFRB_FOREACH(a, &b)
-				if ((opts & PF_OPT_VERBOSE2) || a->pfra_fback)
+				if (opts & PF_OPT_VERBOSE2 ||
+				    a->pfra_fback != PFR_FB_NONE)
 					print_addrx(a, NULL,
 					    opts & PF_OPT_USEDNS);
 	} else if (!strcmp(command, "replace")) {
@@ -254,7 +245,8 @@ pfctl_table(int argc, char *argv[], char *tname, const char *command,
 			xprintf(opts, "no changes");
 		if (opts & PF_OPT_VERBOSE)
 			PFRB_FOREACH(a, &b)
-				if ((opts & PF_OPT_VERBOSE2) || a->pfra_fback)
+				if (opts & PF_OPT_VERBOSE2 ||
+				    a->pfra_fback != PFR_FB_NONE)
 					print_addrx(a, NULL,
 					    opts & PF_OPT_USEDNS);
 	} else if (!strcmp(command, "expire")) {
@@ -277,7 +269,7 @@ pfctl_table(int argc, char *argv[], char *tname, const char *command,
 				break;
 		}
 		PFRB_FOREACH(p, &b) {
-			((struct pfr_astats *)p)->pfras_a.pfra_fback = 0;
+			((struct pfr_astats *)p)->pfras_a.pfra_fback = PFR_FB_NONE;
 			if (time(NULL) - ((struct pfr_astats *)p)->pfras_tzero >
 			     lifetime)
 				if (pfr_buf_add(&b2,
@@ -292,7 +284,8 @@ pfctl_table(int argc, char *argv[], char *tname, const char *command,
 		xprintf(opts, "%d/%d addresses expired", ndel, b2.pfrb_size);
 		if (opts & PF_OPT_VERBOSE)
 			PFRB_FOREACH(a, &b2)
-				if ((opts & PF_OPT_VERBOSE2) || a->pfra_fback)
+				if (opts & PF_OPT_VERBOSE2 ||
+				    a->pfra_fback != PFR_FB_NONE)
 					print_addrx(a, NULL,
 					    opts & PF_OPT_USEDNS);
 	} else if (!strcmp(command, "show")) {

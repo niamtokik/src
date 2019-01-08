@@ -1,4 +1,4 @@
-/* $OpenBSD: dwiic_acpi.c,v 1.5 2018/05/18 06:49:47 kettenis Exp $ */
+/* $OpenBSD: dwiic_acpi.c,v 1.8 2018/07/01 11:37:11 kettenis Exp $ */
 /*
  * Synopsys DesignWare I2C controller
  *
@@ -108,7 +108,7 @@ dwiic_acpi_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_devnode = aa->aaa_node;
 	memcpy(&sc->sc_hid, aa->aaa_dev, sizeof(sc->sc_hid));
 
-	printf(": %s", sc->sc_devnode->name);
+	printf(" %s", sc->sc_devnode->name);
 
 	if (aml_evalname(sc->sc_acpi, sc->sc_devnode, "_CRS", 0, NULL, &res)) {
 		printf(", no _CRS method\n");
@@ -393,6 +393,10 @@ dwiic_acpi_found_hid(struct aml_node *node, void *arg)
 	ia.ia_tag = sc->sc_iba.iba_tag;
 	ia.ia_name = dev;
 	ia.ia_addr = crs.i2c_addr;
+	ia.ia_cookie = node->parent;
+
+	if (crs.irq_int != 0 || crs.gpio_int_node != NULL)
+		ia.ia_intr = &crs;
 
 	config_found(sc->sc_iic, &ia, dwiic_i2c_print);
 	node->parent->attached = 1;

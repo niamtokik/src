@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.214 2018/05/01 18:14:10 florian Exp $	*/
+/*	$OpenBSD: route.c,v 1.227 2018/11/12 16:39:12 krw Exp $	*/
 /*	$NetBSD: route.c,v 1.16 1996/04/15 18:27:05 cgd Exp $	*/
 
 /*
@@ -108,7 +108,6 @@ void	 pmsg_common(struct rt_msghdr *);
 void	 pmsg_addrs(char *, int);
 void	 bprintf(FILE *, int, char *);
 void	 mask_addr(union sockunion *, union sockunion *, int);
-int	 inet6_makenetandmask(struct sockaddr_in6 *, char *);
 int	 getaddr(int, int, char *, struct hostent **);
 void	 getmplslabel(char *, int);
 int	 rtmsg(int, int, int, uint8_t);
@@ -121,6 +120,7 @@ int	 rdomain(int, char **);
 void	 print_rtdns(struct sockaddr_rtdns *);
 void	 print_rtstatic(struct sockaddr_rtstatic *);
 void	 print_rtsearch(struct sockaddr_rtsearch *);
+void	 print_80211info(struct if_ieee80211_msghdr *);
 
 __dead void
 usage(char *cp)
@@ -130,7 +130,7 @@ usage(char *cp)
 	if (cp)
 		warnx("botched keyword: %s", cp);
 	fprintf(stderr,
-	    "usage: %s [-dnqtv] [-T tableid] command [[modifiers] args]\n",
+	    "usage: %s [-dnqtv] [-T rtable] command [[modifiers] args]\n",
 	    __progname);
 	fprintf(stderr,
 	    "commands: add, change, delete, exec, flush, get, monitor, show\n");
@@ -150,6 +150,7 @@ main(int argc, char **argv)
 	int kw;
 	int Terr = 0;
 	int af = AF_UNSPEC;
+	u_int rtable_any = RTABLE_ANY;
 
 	if (argc < 2)
 		usage(NULL);
@@ -209,7 +210,8 @@ main(int argc, char **argv)
 				case K_IFACE:
 				case K_INTERFACE:
 					filter = ROUTE_FILTER(RTM_IFINFO) |
-					    ROUTE_FILTER(RTM_IFANNOUNCE);
+					    ROUTE_FILTER(RTM_IFANNOUNCE) |
+					    ROUTE_FILTER(RTM_80211INFO);
 					break;
 				default:
 					usage(*argv);
@@ -231,10 +233,15 @@ main(int argc, char **argv)
 	}
 
 	/* force socket onto table user requested */
-	if (Tflag == 1 && Terr == 0 &&
-	    setsockopt(s, AF_ROUTE, ROUTE_TABLEFILTER,
-	    &tableid, sizeof(tableid)) == -1)
-		err(1, "setsockopt(ROUTE_TABLEFILTER)");
+	if (Tflag == 1 && Terr == 0) {
+		if (setsockopt(s, AF_ROUTE, ROUTE_TABLEFILTER,
+		    &tableid, sizeof(tableid)) == -1)
+			err(1, "setsockopt(ROUTE_TABLEFILTER)");
+	} else {
+		if (setsockopt(s, AF_ROUTE, ROUTE_TABLEFILTER,
+		    &rtable_any, sizeof(tableid)) == -1)
+			err(1, "setsockopt(ROUTE_TABLEFILTER)");
+	}
 
 	if (pledge("stdio dns route", NULL) == -1)
 		err(1, "pledge");
@@ -448,6 +455,7 @@ newroute(int argc, char **argv)
 	int key;
 	uint8_t prio = 0;
 	struct hostent *hp = NULL;
+	int sawdest = 0;
 
 	if (uid)
 		errx(1, "must be root to alter routing table");
@@ -579,6 +587,7 @@ newroute(int argc, char **argv)
 					usage(1+*argv);
 				ishost = getaddr(RTA_DST, af, *++argv, &hp);
 				dest = *argv;
+				sawdest = 1;
 				break;
 			case K_LABEL:
 				if (!--argc)
@@ -586,6 +595,9 @@ newroute(int argc, char **argv)
 				getlabel(*++argv);
 				break;
 			case K_NETMASK:
+				if (!sawdest)
+					errx(1, "-netmask must follow "
+					    "destination parameter");
 				if (!--argc)
 					usage(1+*argv);
 				getaddr(RTA_NETMASK, af, *++argv, NULL);
@@ -594,6 +606,9 @@ newroute(int argc, char **argv)
 				forcenet++;
 				break;
 			case K_PREFIXLEN:
+				if (!sawdest)
+					errx(1, "-prefixlen must follow "
+					    "destination parameter");
 				if (!--argc)
 					usage(1+*argv);
 				ishost = prefixlen(af, *++argv);
@@ -633,6 +648,7 @@ newroute(int argc, char **argv)
 		} else {
 			if ((rtm_addrs & RTA_DST) == 0) {
 				dest = *argv;
+				sawdest = 1;
 				ishost = getaddr(RTA_DST, af, *argv, &hp);
 			} else if ((rtm_addrs & RTA_GATEWAY) == 0) {
 				gateway = *argv;
@@ -745,37 +761,19 @@ show(int argc, char *argv[])
 void
 inet_makenetandmask(u_int32_t net, struct sockaddr_in *sin, int bits)
 {
-	u_int32_t addr, mask = 0;
+	u_int32_t mask;
 	char *cp;
 
 	rtm_addrs |= RTA_NETMASK;
-	if (net == 0 && bits == 0)
-		mask = addr = 0;
-	else if (bits) {
-		addr = net;
+	if (bits == 0 && net == 0)
+		mask = 0;
+	else {
+		if (bits == 0)
+			bits = 32;
 		mask = 0xffffffff << (32 - bits);
-	} else if (net < 128) {
-		addr = net << IN_CLASSA_NSHIFT;
-		mask = IN_CLASSA_NET;
-	} else if (net < 65536) {
-		addr = net << IN_CLASSB_NSHIFT;
-		mask = IN_CLASSB_NET;
-	} else if (net < 16777216L) {
-		addr = net << IN_CLASSC_NSHIFT;
-		mask = IN_CLASSC_NET;
-	} else {
-		addr = net;
-		if ((addr & IN_CLASSA_HOST) == 0)
-			mask = IN_CLASSA_NET;
-		else if ((addr & IN_CLASSB_HOST) == 0)
-			mask = IN_CLASSB_NET;
-		else if ((addr & IN_CLASSC_HOST) == 0)
-			mask = IN_CLASSC_NET;
-		else
-			mask = 0xffffffff;
+		net &= mask;
 	}
-	addr &= mask;
-	sin->sin_addr.s_addr = htonl(addr);
+	sin->sin_addr.s_addr = htonl(net);
 	sin = &so_mask.sin;
 	sin->sin_addr.s_addr = htonl(mask);
 	sin->sin_len = 0;
@@ -787,52 +785,6 @@ inet_makenetandmask(u_int32_t net, struct sockaddr_in *sin, int bits)
 }
 
 /*
- * XXX the function may need more improvement...
- */
-int
-inet6_makenetandmask(struct sockaddr_in6 *sin6, char *plen)
-{
-	struct in6_addr in6;
-	const char *errstr;
-	int i, len, q, r;
-
-	if (NULL==plen) {
-		if (IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr) &&
-		    sin6->sin6_scope_id == 0) {
-			plen = "0";
-		} else if ((sin6->sin6_addr.s6_addr[0] & 0xe0) == 0x20) {
-			/* aggregatable global unicast - RFC2374 */
-			memset(&in6, 0, sizeof(in6));
-			if (!memcmp(&sin6->sin6_addr.s6_addr[8],
-			    &in6.s6_addr[8], 8))
-				plen = "64";
-		}
-	}
-
-	if (!plen || strcmp(plen, "128") == 0)
-		return (1);
-	else {
-		rtm_addrs |= RTA_NETMASK;
-		prefixlen(AF_INET6, plen);
-
-		len = strtonum(plen, 0, 128, &errstr);
-		if (errstr)
-			errx(1, "prefixlen %s is %s", plen, errstr);
-
-		q = (128-len) >> 3;
-		r = (128-len) & 7;
-		i = 15;
-
-		while (q-- > 0)
-			sin6->sin6_addr.s6_addr[i--] = 0;
-		if (r > 0)
-			sin6->sin6_addr.s6_addr[i] &= 0xff << r;
-
-		return (0);
-	}
-}
-
-/*
  * Interpret an argument as a network address of some kind,
  * returning 1 if a host address, 0 if a network address.
  */
@@ -841,10 +793,9 @@ getaddr(int which, int af, char *s, struct hostent **hpp)
 {
 	sup su = NULL;
 	struct hostent *hp;
-	int afamily, bits, irc;
-	in_addr_t addr;
+	int afamily, bits;
 
-	if (af == 0) {
+	if (af == AF_UNSPEC) {
 		if (strchr(s, ':') != NULL) {
 			af = AF_INET6;
 			aflen = sizeof(struct sockaddr_in6);
@@ -917,8 +868,6 @@ getaddr(int which, int af, char *s, struct hostent **hpp)
 			if (getaddrinfo(buf, "0", &hints, &res) != 0)
 				errx(1, "%s: bad value", s);
 		}
-		if (sizeof(su->sin6) != res->ai_addrlen)
-			errx(1, "%s: bad value", s);
 		if (res->ai_next)
 			errx(1, "%s: resolved to multiple values", s);
 		memcpy(&su->sin6, res->ai_addr, sizeof(su->sin6));
@@ -932,8 +881,13 @@ getaddr(int which, int af, char *s, struct hostent **hpp)
 			su->sin6.sin6_scope_id = 0;
 		}
 		if (hints.ai_flags == AI_NUMERICHOST) {
-			if (which == RTA_DST)
-				return (inet6_makenetandmask(&su->sin6, sep));
+			if (which == RTA_DST) {
+				if (sep == NULL && su->sin6.sin6_scope_id == 0 &&
+				    IN6_IS_ADDR_UNSPECIFIED(&su->sin6.sin6_addr))
+					sep = "0";
+				if (sep == NULL || prefixlen(AF_INET6, sep))
+					return (1);
+			}
 			return (0);
 		} else
 			return (1);
@@ -968,27 +922,12 @@ getaddr(int which, int af, char *s, struct hostent **hpp)
 			if (inet_pton(AF_INET, s, &su->sin.sin_addr) == 1)
 				return (1);
 		hp = gethostbyname(s);
-		if (hp != NULL) {
-			if (which == RTA_DST && !forcehost) {
-				addr = ((struct in_addr *)hp->h_addr)->s_addr;
-				if (addr != 0) {
-					inet_makenetandmask(ntohl(addr),
-					    &su->sin, 0);
-					irc = so_mask.sin.sin_addr.s_addr ==
-					    0xffffffff;
-					if (irc == 0 || !forcenet)
-						return (irc);
-				}
-				if (forcenet)
-					errx(1, "%s: not a network", s);
-			}
-			if (hpp != NULL)
-				*hpp = hp;
-			su->sin.sin_addr = *(struct in_addr *)hp->h_addr;
-			return (1);
-		}
-		errx(1, "%s: bad address", s);
-		/* NOTREACHED */
+		if (hp == NULL)
+			errx(1, "%s: bad address", s);
+		if (hpp != NULL)
+			*hpp = hp;
+		su->sin.sin_addr = *(struct in_addr *)hp->h_addr;
+		return (1);
 
 	default:
 		errx(1, "%d: bad address family", afamily);
@@ -1003,7 +942,7 @@ getmplslabel(char *s, int in)
 	const char *errstr;
 	u_int32_t label;
 
-	label = strtonum(s, 0, 0x000fffff, &errstr);
+	label = strtonum(s, 0, MPLS_LABEL_MAX, &errstr);
 	if (errstr)
 		errx(1, "bad label: %s is %s", s, errstr);
 	if (in) {
@@ -1117,7 +1056,7 @@ rtmsg(int cmd, int flags, int fmask, uint8_t prio)
 		cmd = RTM_CHANGE;
 	else if (cmd == 'g') {
 		cmd = RTM_GET;
-		if (so_ifp.sa.sa_family == 0) {
+		if (so_ifp.sa.sa_family == AF_UNSPEC) {
 			so_ifp.sa.sa_family = AF_LINK;
 			so_ifp.sa.sa_len = sizeof(struct sockaddr_dl);
 			rtm_addrs |= RTA_IFP;
@@ -1185,7 +1124,7 @@ mask_addr(union sockunion *addr, union sockunion *mask, int which)
 	switch (addr->sa.sa_family) {
 	case AF_INET:
 	case AF_INET6:
-	case 0:
+	case AF_UNSPEC:
 		return;
 	}
 	cp1 = mask->sa.sa_len + 1 + (char *)addr;
@@ -1206,9 +1145,9 @@ char *msgtypes[] = {
 	"RTM_LOSING: Kernel Suspects Partitioning",
 	"RTM_REDIRECT: Told to use different route",
 	"RTM_MISS: Lookup failed on this address",
-	"RTM_LOCK: fix specified metrics",
-	"RTM_OLDADD: caused by SIOCADDRT",
-	"RTM_OLDDEL: caused by SIOCDELRT",
+	"",
+	"",
+	"",
 	"RTM_RESOLVE: Route created by cloning",
 	"RTM_NEWADDR: address being added to iface",
 	"RTM_DELADDR: address being removed from iface",
@@ -1217,7 +1156,9 @@ char *msgtypes[] = {
 	"RTM_DESYNC: route socket overflow",
 	"RTM_INVALIDATE: invalidate cache of L2 route",
 	"RTM_BFD: bidirectional forwarding detection",
-	"RTM_PROPOSAL: config proposal"
+	"RTM_PROPOSAL: config proposal",
+	"RTM_CHGADDRATTR: address attributes being changed",
+	"RTM_80211INFO: 802.11 iface status change"
 };
 
 char metricnames[] =
@@ -1286,8 +1227,15 @@ print_rtmsg(struct rt_msghdr *rtm, int msglen)
 		bprintf(stdout, ifm->ifm_flags, ifnetflags);
 		pmsg_addrs((char *)ifm + ifm->ifm_hdrlen, ifm->ifm_addrs);
 		break;
+	case RTM_80211INFO:
+		printf(", if# %d, ", rtm->rtm_index);
+		if (if_indextoname(rtm->rtm_index, ifname) != NULL)
+			printf("name: %s, ", ifname);
+		print_80211info((struct if_ieee80211_msghdr *)rtm);
+		break;
 	case RTM_NEWADDR:
 	case RTM_DELADDR:
+	case RTM_CHGADDRATTR:
 		ifam = (struct ifa_msghdr *)rtm;
 		printf(", metric %d, flags:", ifam->ifam_metric);
 		bprintf(stdout, ifam->ifam_flags, routeflags);
@@ -2129,4 +2077,39 @@ print_rtsearch(struct sockaddr_rtsearch *rtsearch)
 	}
 
 	printf("%.*s\n", (int)srclen, src);
+}
+
+/*
+ * Print RTM_80211INFO info.
+ */
+void
+print_80211info(struct if_ieee80211_msghdr *ifim)
+{
+	unsigned int ascii, nwidlen, i;
+	u_int8_t *nwid, *bssid;
+
+	ascii = 1;
+	nwid = ifim->ifim_ifie.ifie_nwid;
+	nwidlen = ifim->ifim_ifie.ifie_nwid_len;
+	for (i = 0; i < nwidlen; i++) {
+		if (i == 0)
+			printf("nwid ");
+		else
+			printf(":");
+		printf("%02x", nwid[i]);
+		if (!isprint((unsigned int)nwid[i]))
+			ascii = 0;
+	}
+	if (i > 0) {
+		if (ascii == 1)
+			printf(" (%.*s)", nwidlen, nwid);
+		printf(", ");
+	}
+	printf("channel %u, ", ifim->ifim_ifie.ifie_channel);
+	bssid = ifim->ifim_ifie.ifie_addr;
+	printf("bssid %02x:%02x:%02x:%02x:%02x:%02x, ",
+	    bssid[0], bssid[1], bssid[2],
+	    bssid[3], bssid[4], bssid[5]);
+	printf("flags: 0x%x, xflags: 0x%x\n", ifim->ifim_ifie.ifie_flags,
+	    ifim->ifim_ifie.ifie_xflags);
 }

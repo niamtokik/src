@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpe.c,v 1.52 2018/04/15 11:57:29 mpf Exp $	*/
+/*	$OpenBSD: snmpe.c,v 1.56 2018/11/13 07:29:07 mestre Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -45,8 +45,6 @@ int	 snmpe_parse(struct snmp_message *);
 void	 snmpe_tryparse(int, struct snmp_message *);
 int	 snmpe_parsevarbinds(struct snmp_message *);
 void	 snmpe_response(struct snmp_message *);
-unsigned long
-	 snmpe_application(struct ber_element *);
 void	 snmpe_sig_handler(int sig, short, void *);
 int	 snmpe_dispatch_parent(int, struct privsep_proc *, struct imsg *);
 int	 snmpe_bind(struct address *);
@@ -122,14 +120,10 @@ snmpe_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 		event_add(&so->s_ev, NULL);
 	}
 
-#if 0
-	/*
-	 * XXX Refactoring required to move illegal ioctls and sysctls.
-	 * XXX See mps_* and if_mib in mib.c, etc.
-	 */
-BROKEN	if (pledge("stdio inet route recvfd vminfo", NULL) == -1)
-		fatal("pledge");
-#endif
+	if (unveil("/", "") == -1)
+		fatal("unveil");
+	if (unveil(NULL, NULL) == -1)
+		fatal("unveil");
 }
 
 void
@@ -224,7 +218,7 @@ snmpe_parse(struct snmp_message *msg)
 	struct ber_element	*a;
 	long long		 ver, req;
 	long long		 errval, erridx;
-	unsigned long		 type;
+	unsigned int		 type;
 	u_int			 class;
 	char			*comn;
 	char			*flagstr, *ctxname;

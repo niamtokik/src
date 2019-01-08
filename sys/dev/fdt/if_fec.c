@@ -1,4 +1,4 @@
-/* $OpenBSD: if_fec.c,v 1.3 2018/04/27 06:41:12 patrick Exp $ */
+/* $OpenBSD: if_fec.c,v 1.6 2018/08/06 10:52:30 patrick Exp $ */
 /*
  * Copyright (c) 2012-2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -271,6 +271,7 @@ fec_match(struct device *parent, void *match, void *aux)
 	struct fdt_attach_args *faa = aux;
 
 	return (OF_is_compatible(faa->fa_node, "fsl,imx6q-fec") ||
+	    OF_is_compatible(faa->fa_node, "fsl,imx6sx-fec") ||
 	    OF_is_compatible(faa->fa_node, "fsl,imx8mq-fec"));
 }
 
@@ -344,11 +345,11 @@ fec_attach(struct device *parent, struct device *self, void *aux)
 	HWRITE4(sc, ENET_EIMR, 0);
 	HWRITE4(sc, ENET_EIR, 0xffffffff);
 
-	sc->sc_ih[0] = arm_intr_establish_fdt_idx(faa->fa_node, 0, IPL_NET,
+	sc->sc_ih[0] = fdt_intr_establish_idx(faa->fa_node, 0, IPL_NET,
 	    fec_intr, sc, sc->sc_dev.dv_xname);
-	sc->sc_ih[1] = arm_intr_establish_fdt_idx(faa->fa_node, 1, IPL_NET,
+	sc->sc_ih[1] = fdt_intr_establish_idx(faa->fa_node, 1, IPL_NET,
 	    fec_intr, sc, sc->sc_dev.dv_xname);
-	sc->sc_ih[2] = arm_intr_establish_fdt_idx(faa->fa_node, 2, IPL_NET,
+	sc->sc_ih[2] = fdt_intr_establish_idx(faa->fa_node, 2, IPL_NET,
 	    fec_intr, sc, sc->sc_dev.dv_xname);
 
 	tsize = ENET_MAX_TXD * sizeof(struct fec_buf_desc);
@@ -716,6 +717,8 @@ fec_stop(struct fec_softc *sc)
 	HSET4(sc, ENET_ECR, ENET_ECR_RESET);
 	while (HREAD4(sc, ENET_ECR) & ENET_ECR_ETHEREN)
 		continue;
+
+	HWRITE4(sc, ENET_MSCR, (sc->sc_phy_speed << 1) | 0x100);
 }
 
 void

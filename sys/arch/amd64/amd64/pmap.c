@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.114 2018/04/26 06:51:48 mpi Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.122 2019/01/06 02:15:40 mlarkin Exp $	*/
 /*	$NetBSD: pmap.c,v 1.3 2003/05/08 18:13:13 thorpej Exp $	*/
 
 /*
@@ -189,9 +189,9 @@
  * is a void function.
  *
  * [B] new page tables pages (PTP)
- * 	call uvm_pagealloc()
- * 		=> success: zero page, add to pm_pdir
- * 		=> failure: we are out of free vm_pages, let pmap_enter()
+ *	call uvm_pagealloc()
+ *		=> success: zero page, add to pm_pdir
+ *		=> failure: we are out of free vm_pages, let pmap_enter()
  *		   tell UVM about it.
  *
  * note: for kernel PTPs, we start with NKPTP of them.   as we map
@@ -228,6 +228,24 @@ struct pmap kernel_pmap_store;	/* the kernel's pmap (proc0) */
  * UC- so mtrrs can override the cacheability;
  */
 int pmap_pg_wc = PG_UCMINUS;
+
+/*
+ * pmap_use_pcid: nonzero if PCID use is enabled (currently we require INVPCID)
+ *
+ * The next three are zero unless and until PCID support is enabled so code
+ * can just 'or' them in as needed without tests.
+ * cr3_pcid: CR3_REUSE_PCID
+ * cr3_pcid_proc and cr3_pcid_temp: PCID_PROC and PCID_TEMP
+ */
+#if PCID_KERN != 0
+# error "pmap.c assumes PCID_KERN is zero"
+#endif
+int pmap_use_pcid;
+static u_int cr3_pcid_proc;
+static u_int cr3_pcid_temp;
+/* these two are accessed from locore.o */
+paddr_t cr3_reuse_pcid;
+paddr_t cr3_pcid_proc_intel;
 
 /*
  * other data structures
@@ -279,8 +297,6 @@ extern vaddr_t lo32_paddr;
 vaddr_t virtual_avail;
 extern int end;
 
-extern uint32_t cpu_meltdown;
-
 /*
  * local prototypes
  */
@@ -314,6 +330,7 @@ boolean_t pmap_get_physpage(vaddr_t, int, paddr_t *);
 boolean_t pmap_pdes_valid(vaddr_t, pd_entry_t *);
 void pmap_alloc_level(vaddr_t, int, long *);
 
+static inline
 void pmap_sync_flags_pte(struct vm_page *, u_long);
 
 void pmap_tlb_shootpage(struct pmap *, vaddr_t, int);
@@ -338,8 +355,7 @@ static __inline boolean_t
 pmap_is_curpmap(struct pmap *pmap)
 {
 	return((pmap == pmap_kernel()) ||
-	       (pmap->pm_pdirpa == (paddr_t) rcr3()) ||
-	       (pmap->pm_pdirpa_intel == (paddr_t) rcr3()));
+	       (pmap->pm_pdirpa == (rcr3() & CR3_PADDR)));
 }
 
 /*
@@ -362,7 +378,7 @@ pmap_pte2flags(u_long pte)
 	    ((pte & PG_M) ? PG_PMAP_MOD : 0));
 }
 
-void
+static inline void
 pmap_sync_flags_pte(struct vm_page *pg, u_long pte)
 {
 	if (pte & (PG_U|PG_M)) {
@@ -378,27 +394,30 @@ pmap_sync_flags_pte(struct vm_page *pg, u_long pte)
 paddr_t
 pmap_map_ptes(struct pmap *pmap)
 {
-	paddr_t cr3 = rcr3();
+	paddr_t cr3;
 
 	KASSERT(pmap->pm_type != PMAP_TYPE_EPT);
 
 	/* the kernel's pmap is always accessible */
-	if (pmap == pmap_kernel() || pmap->pm_pdirpa == cr3) {
+	if (pmap == pmap_kernel())
+		return 0;
+
+	/*
+	 * Lock the target map before switching to its page tables to
+	 * guarantee other CPUs have finished changing the tables before
+	 * we potentially start caching table and TLB entries.
+	 */
+	mtx_enter(&pmap->pm_mtx);
+
+	cr3 = rcr3();
+	KASSERT((cr3 & CR3_PCID) == PCID_KERN ||
+		(cr3 & CR3_PCID) == PCID_PROC);
+	if (pmap->pm_pdirpa == (cr3 & CR3_PADDR))
 		cr3 = 0;
-	} else {
-		/*
-		 * Not sure if we need this, but better be safe.
-		 * We don't have the current pmap in order to unset its
-		 * active bit, but this just means that we may receive
-		 * an unneccessary cross-CPU TLB flush now and then.
-		 */
-		x86_atomic_setbits_u64(&pmap->pm_cpus, (1ULL << cpu_number()));
-
-		lcr3(pmap->pm_pdirpa);
+	else {
+		cr3 |= cr3_reuse_pcid;
+		lcr3(pmap->pm_pdirpa | cr3_pcid_temp);
 	}
-
-	if (pmap != pmap_kernel())
-		mtx_enter(&pmap->pm_mtx);
 
 	return cr3;
 }
@@ -409,10 +428,8 @@ pmap_unmap_ptes(struct pmap *pmap, paddr_t save_cr3)
 	if (pmap != pmap_kernel())
 		mtx_leave(&pmap->pm_mtx);
 
-	if (save_cr3 != 0) {
-		x86_atomic_clearbits_u64(&pmap->pm_cpus, (1ULL << cpu_number()));
+	if (save_cr3 != 0)
 		lcr3(save_cr3);
-	}
 }
 
 int
@@ -536,10 +553,6 @@ pmap_kremove(vaddr_t sva, vsize_t len)
  * pmap_bootstrap: get the system in a state where it can run with VM
  *	properly enabled (called before main()).   the VM system is
  *      fully init'd later...
- *
- * => on i386, locore.s has already enabled the MMU by allocating
- *	a PDP for the kernel, and nkpde PTP's for the kernel.
- * => kva_start is the first free virtual address in kernel space
  */
 
 paddr_t
@@ -600,6 +613,23 @@ pmap_bootstrap(paddr_t first_avail, paddr_t max_pa)
 	kpm->pm_type = PMAP_TYPE_NORMAL;
 
 	curpcb->pcb_pmap = kpm;	/* proc0's pcb */
+
+	/*
+	 * Configure and enable PCID use if supported.
+	 * Currently we require INVPCID support.
+	 */
+	if ((cpu_ecxfeature & CPUIDECX_PCID) && cpuid_level >= 0x07) {
+		uint32_t ebx, dummy;
+		CPUID_LEAF(0x7, 0, dummy, ebx, dummy, dummy);
+		if (ebx & SEFF0EBX_INVPCID) {
+			pmap_use_pcid = 1;
+			lcr4( rcr4() | CR4_PCIDE );
+			cr3_pcid_proc = PCID_PROC;
+			cr3_pcid_temp = PCID_TEMP;
+			cr3_reuse_pcid = CR3_REUSE_PCID;
+			cr3_pcid_proc_intel = PCID_PROC_INTEL;
+		}
+	}
 
 	/*
 	 * Add PG_G attribute to already mapped kernel pages. pg_g_kern
@@ -745,18 +775,11 @@ pmap_prealloc_lowmem_ptps(paddr_t first_avail)
 }
 
 /*
- * pmap_init: called from uvm_init, our job is to get the pmap
- * system ready to manage mappings... this mainly means initing
- * the pv_entry stuff.
+ * pmap_init: no further initialization required on this platform
  */
-
 void
 pmap_init(void)
 {
-	/*
-	 * done: pmap module is up (and ready for business)
-	 */
-
 	pmap_initialized = TRUE;
 }
 
@@ -1147,7 +1170,7 @@ pmap_destroy(struct pmap *pmap)
 
 			pg->wire_count = 0;
 			pmap->pm_stats.resident_count--;
-			
+
 			uvm_pagefree(pg);
 		}
 	}
@@ -1156,7 +1179,7 @@ pmap_destroy(struct pmap *pmap)
 	pool_put(&pmap_pdp_pool, pmap->pm_pdir);
 
 	if (pmap->pm_pdir_intel) {
-		pmap->pm_stats.resident_count--;	
+		pmap->pm_stats.resident_count--;
 		pool_put(&pmap_pdp_pool, pmap->pm_pdir_intel);
 	}
 
@@ -1188,8 +1211,20 @@ pmap_activate(struct proc *p)
 
 	pcb->pcb_pmap = pmap;
 	pcb->pcb_cr3 = pmap->pm_pdirpa;
+	pcb->pcb_cr3 |= (pmap != pmap_kernel()) ? cr3_pcid_proc :
+	    (PCID_KERN | cr3_reuse_pcid);
+
 	if (p == curproc) {
 		lcr3(pcb->pcb_cr3);
+
+		/* in case we return to userspace without context switching */
+		if (cpu_meltdown) {
+			struct cpu_info *self = curcpu();
+
+			self->ci_kern_cr3 = pcb->pcb_cr3 | cr3_reuse_pcid;
+			self->ci_user_cr3 = pmap->pm_pdirpa_intel |
+			    cr3_pcid_proc_intel;
+		}
 
 		/*
 		 * mark the pmap in use by this processor.
@@ -1549,7 +1584,7 @@ pmap_do_remove(struct pmap *pmap, vaddr_t sva, vaddr_t eva, int flags)
 		goto cleanup;
 	}
 
-	if ((eva - sva > 32 * PAGE_SIZE) && pmap != pmap_kernel())
+	if ((eva - sva > 32 * PAGE_SIZE) && sva < VM_MIN_KERNEL_ADDRESS)
 		shootall = 1;
 
 	for (va = sva; va < eva; va = blkendva) {
@@ -1850,7 +1885,7 @@ pmap_write_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 	if (!(prot & PROT_EXEC))
 		nx = pg_nx;
 
-	if ((eva - sva > 32 * PAGE_SIZE) && pmap != pmap_kernel())
+	if ((eva - sva > 32 * PAGE_SIZE) && sva < VM_MIN_KERNEL_ADDRESS)
 		shootall = 1;
 
 	for (va = sva; va < eva ; va = blockend) {
@@ -1995,7 +2030,7 @@ pmap_enter_special(vaddr_t va, paddr_t pa, vm_prot_t prot)
 	if (!pmap->pm_pdir_intel)
 		pmap->pm_pdir_intel = pool_get(&pmap_pdp_pool,
 		    PR_WAITOK | PR_ZERO);
-	
+
 	l4idx = (va & L4_MASK) >> L4_SHIFT; /* PML4E idx */
 	l3idx = (va & L3_MASK) >> L3_SHIFT; /* PDPTE idx */
 	l2idx = (va & L2_MASK) >> L2_SHIFT; /* PDE idx */
@@ -2088,15 +2123,25 @@ pmap_enter_special(vaddr_t va, paddr_t pa, vm_prot_t prot)
 	    "0x%llx was 0x%llx\n", __func__, (uint64_t)npa, (uint64_t)pd,
 	    (uint64_t)prot, (uint64_t)pd[l1idx]);
 
-	pd[l1idx] = pa | protection_codes[prot] | PG_V | PG_G | PG_W;
-	DPRINTF("%s: setting PTE[%lld] = 0x%llx\n", __func__, l1idx, pd[l1idx]);
+	pd[l1idx] = pa | protection_codes[prot] | PG_V | PG_W;
 
-	/* now set the PG_G flag on the corresponding U+K entry */
+	/*
+	 * Look up the corresponding U+K entry.  If we're installing the
+	 * same PA into the U-K map then set the PG_G bit on both
+	 */
 	level = pmap_find_pte_direct(pmap, va, &ptes, &offs);
-	if (__predict_true(level == 0 && pmap_valid_entry(ptes[offs])))
-		ptes[offs] |= PG_G;
-	else
+	if (__predict_true(level == 0 && pmap_valid_entry(ptes[offs]))) {
+		if (((pd[l1idx] ^ ptes[offs]) & PG_FRAME) == 0) {
+			pd[l1idx] |= PG_G;
+			ptes[offs] |= PG_G;
+		} else {
+			DPRINTF("%s: special diffing mapping at %llx\n",
+			    __func__, (long long)va);
+		}
+	} else
 		DPRINTF("%s: no U+K mapping for special mapping?\n", __func__);
+
+	DPRINTF("%s: setting PTE[%lld] = 0x%llx\n", __func__, l1idx, pd[l1idx]);
 }
 
 void pmap_remove_ept(struct pmap *pmap, vaddr_t sgpa, vaddr_t egpa)
@@ -2343,7 +2388,7 @@ pmap_enter_ept(struct pmap *pmap, paddr_t gpa, paddr_t hpa, vm_prot_t prot)
 	} else {
 		/* XXX flush ept */
 	}
-	
+
 	pd[l1idx] = npte;
 
 	return 0;
@@ -2807,7 +2852,7 @@ pmap_convert(struct pmap *pmap, int mode)
 		}
 	}
 
-	return (0);	
+	return (0);
 }
 
 #ifdef MULTIPROCESSOR
@@ -2841,6 +2886,7 @@ volatile long tlb_shoot_wait __attribute__((section(".kudata")));
 
 volatile vaddr_t tlb_shoot_addr1 __attribute__((section(".kudata")));
 volatile vaddr_t tlb_shoot_addr2 __attribute__((section(".kudata")));
+volatile int tlb_shoot_first_pcid __attribute__((section(".kudata")));
 
 void
 pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
@@ -2849,10 +2895,12 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 	CPU_INFO_ITERATOR cii;
 	long wait = 0;
 	u_int64_t mask = 0;
+	int is_kva = va >= VM_MIN_KERNEL_ADDRESS;
 
 	CPU_INFO_FOREACH(cii, ci) {
-		if (ci == self || !pmap_is_active(pm, ci->ci_cpuid) ||
-		    !(ci->ci_flags & CPUF_RUNNING))
+		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
+			continue;
+		if (!is_kva && !pmap_is_active(pm, ci->ci_cpuid))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
 		wait++;
@@ -2877,6 +2925,7 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 #endif
 			}
 		}
+		tlb_shoot_first_pcid = is_kva ? PCID_KERN : PCID_PROC;
 		tlb_shoot_addr1 = va;
 		CPU_INFO_FOREACH(cii, ci) {
 			if ((mask & (1ULL << ci->ci_cpuid)) == 0)
@@ -2887,8 +2936,17 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 		splx(s);
 	}
 
-	if (shootself)
-		pmap_update_pg(va);
+	if (!pmap_use_pcid) {
+		if (shootself)
+			pmap_update_pg(va);
+	} else if (is_kva) {
+		invpcid(INVPCID_ADDR, PCID_PROC, va);
+		invpcid(INVPCID_ADDR, PCID_KERN, va);
+	} else if (shootself) {
+		invpcid(INVPCID_ADDR, PCID_PROC, va);
+		if (cpu_meltdown)
+			invpcid(INVPCID_ADDR, PCID_PROC_INTEL, va);
+	}
 }
 
 void
@@ -2898,11 +2956,13 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 	CPU_INFO_ITERATOR cii;
 	long wait = 0;
 	u_int64_t mask = 0;
+	int is_kva = sva >= VM_MIN_KERNEL_ADDRESS;
 	vaddr_t va;
 
 	CPU_INFO_FOREACH(cii, ci) {
-		if (ci == self || !pmap_is_active(pm, ci->ci_cpuid) ||
-		    !(ci->ci_flags & CPUF_RUNNING))
+		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
+			continue;
+		if (!is_kva && !pmap_is_active(pm, ci->ci_cpuid))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
 		wait++;
@@ -2927,6 +2987,7 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 #endif
 			}
 		}
+		tlb_shoot_first_pcid = is_kva ? PCID_KERN : PCID_PROC;
 		tlb_shoot_addr1 = sva;
 		tlb_shoot_addr2 = eva;
 		CPU_INFO_FOREACH(cii, ci) {
@@ -2938,9 +2999,27 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 		splx(s);
 	}
 
-	if (shootself)
-		for (va = sva; va < eva; va += PAGE_SIZE)
-			pmap_update_pg(va);
+	if (!pmap_use_pcid) {
+		if (shootself) {
+			for (va = sva; va < eva; va += PAGE_SIZE)
+				pmap_update_pg(va);
+		}
+	} else if (is_kva) {
+		for (va = sva; va < eva; va += PAGE_SIZE) {
+			invpcid(INVPCID_ADDR, PCID_PROC, va);
+			invpcid(INVPCID_ADDR, PCID_KERN, va);
+		}
+	} else if (shootself) {
+		if (cpu_meltdown) {
+			for (va = sva; va < eva; va += PAGE_SIZE) {
+				invpcid(INVPCID_ADDR, PCID_PROC, va);
+				invpcid(INVPCID_ADDR, PCID_PROC_INTEL, va);
+			}
+		} else {
+			for (va = sva; va < eva; va += PAGE_SIZE)
+				invpcid(INVPCID_ADDR, PCID_PROC, va);
+		}
+	}
 }
 
 void
@@ -2950,6 +3029,8 @@ pmap_tlb_shoottlb(struct pmap *pm, int shootself)
 	CPU_INFO_ITERATOR cii;
 	long wait = 0;
 	u_int64_t mask = 0;
+
+	KASSERT(pm != pmap_kernel());
 
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self || !pmap_is_active(pm, ci->ci_cpuid) ||
@@ -2988,8 +3069,15 @@ pmap_tlb_shoottlb(struct pmap *pm, int shootself)
 		splx(s);
 	}
 
-	if (shootself)
-		tlbflush();
+	if (shootself) {
+		if (!pmap_use_pcid)
+			tlbflush();
+		else {
+			invpcid(INVPCID_PCID, PCID_PROC, 0);
+			if (cpu_meltdown)
+				invpcid(INVPCID_PCID, PCID_PROC_INTEL, 0);
+		}
+	}
 }
 
 void
@@ -3015,9 +3103,17 @@ pmap_tlb_shootwait(void)
 void
 pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 {
-	if (shootself)
-		pmap_update_pg(va);
-
+	if (!pmap_use_pcid) {
+		if (shootself)
+			pmap_update_pg(va);
+	} else if (va >= VM_MIN_KERNEL_ADDRESS) {
+		invpcid(INVPCID_ADDR, PCID_PROC, va);
+		invpcid(INVPCID_ADDR, PCID_KERN, va);
+	} else if (shootself) {
+		invpcid(INVPCID_ADDR, PCID_PROC, va);
+		if (cpu_meltdown)
+			invpcid(INVPCID_ADDR, PCID_PROC_INTEL, va);
+	}
 }
 
 void
@@ -3025,18 +3121,40 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 {
 	vaddr_t va;
 
-	if (!shootself)
-		return;
-
-	for (va = sva; va < eva; va += PAGE_SIZE)
-		pmap_update_pg(va);
-
+	if (!pmap_use_pcid) {
+		if (shootself) {
+			for (va = sva; va < eva; va += PAGE_SIZE)
+				pmap_update_pg(va);
+		}
+	} else if (sva >= VM_MIN_KERNEL_ADDRESS) {
+		for (va = sva; va < eva; va += PAGE_SIZE) {
+			invpcid(INVPCID_ADDR, PCID_PROC, va);
+			invpcid(INVPCID_ADDR, PCID_KERN, va);
+		}
+	} else if (shootself) {
+		if (cpu_meltdown) {
+			for (va = sva; va < eva; va += PAGE_SIZE) {
+				invpcid(INVPCID_ADDR, PCID_PROC, va);
+				invpcid(INVPCID_ADDR, PCID_PROC_INTEL, va);
+			}
+		} else {
+			for (va = sva; va < eva; va += PAGE_SIZE)
+				invpcid(INVPCID_ADDR, PCID_PROC, va);
+		}
+	}
 }
 
 void
 pmap_tlb_shoottlb(struct pmap *pm, int shootself)
 {
-	if (shootself)
-		tlbflush();
+	if (shootself) {
+		if (!pmap_use_pcid)
+			tlbflush();
+		else {
+			invpcid(INVPCID_PCID, PCID_PROC, 0);
+			if (cpu_meltdown)
+				invpcid(INVPCID_PCID, PCID_PROC_INTEL, 0);
+		}
+	}
 }
 #endif /* MULTIPROCESSOR */

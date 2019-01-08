@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_output.c,v 1.124 2018/05/08 15:10:33 bluhm Exp $	*/
+/*	$OpenBSD: tcp_output.c,v 1.128 2018/11/10 18:40:34 bluhm Exp $	*/
 /*	$NetBSD: tcp_output.c,v 1.16 1997/06/03 16:17:09 kml Exp $	*/
 
 /*
@@ -78,7 +78,11 @@
 #include <sys/socketvar.h>
 #include <sys/kernel.h>
 
+#include <net/if.h>
 #include <net/route.h>
+#if NPF > 0
+#include <net/pfvar.h>
+#endif
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -661,7 +665,7 @@ send:
 		}
 		m->m_data += max_linkhdr;
 		m->m_len = hdrlen;
-		if (len <= M_TRAILINGSPACE(m)) {
+		if (len <= m_trailingspace(m)) {
 			m_copydata(so->so_snd.sb_mb, off, (int) len,
 			    mtod(m, caddr_t) + hdrlen);
 			m->m_len += len;
@@ -983,7 +987,7 @@ send:
 	 * Trace.
 	 */
 	if (so->so_options & SO_DEBUG)
-		tcp_trace(TA_OUTPUT, tp->t_state, tp, mtod(m, caddr_t), 0,
+		tcp_trace(TA_OUTPUT, tp->t_state, tp, tp, mtod(m, caddr_t), 0,
 			len);
 
 	/*
@@ -1014,7 +1018,7 @@ send:
 	m->m_pkthdr.ph_rtableid = tp->t_inpcb->inp_rtableid;
 
 #if NPF > 0
-	m->m_pkthdr.pf.inp = tp->t_inpcb;
+	pf_mbuf_link_inpcb(m, tp->t_inpcb);
 #endif
 
 	switch (tp->pf) {
@@ -1080,8 +1084,6 @@ out:
 			tcp_mtudisc(tp->t_inpcb, -1);
 			return (0);
 		}
-		if (error == EACCES)	/* translate pf(4) error for userland */
-			error = EHOSTUNREACH;
 		if ((error == EHOSTUNREACH || error == ENETDOWN) &&
 		    TCPS_HAVERCVDSYN(tp->t_state)) {
 			tp->t_softerror = error;

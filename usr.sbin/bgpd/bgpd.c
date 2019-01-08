@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.c,v 1.192 2018/02/10 01:24:28 benno Exp $ */
+/*	$OpenBSD: bgpd.c,v 1.205 2018/12/27 20:23:24 remi Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -296,7 +296,7 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 		}
 
 		if (pfd[PFD_SOCK_ROUTE].revents & POLLIN) {
-			if (kr_dispatch_msg() == -1)
+			if (kr_dispatch_msg(conf->default_tableid) == -1)
 				quit = 1;
 		}
 
@@ -348,10 +348,8 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 		free(p);
 	}
 
-	control_cleanup(conf->csock);
-	control_cleanup(conf->rcsock);
 	carp_demote_shutdown();
-	kr_shutdown(conf->fib_priority);
+	kr_shutdown(conf->fib_priority, conf->default_tableid);
 	pftable_clear_all();
 
 	free_config(conf);
@@ -436,8 +434,9 @@ reconfigure(char *conffile, struct bgpd_config *conf, struct peer **peer_l)
 	struct listen_addr	*la;
 	struct rde_rib		*rr;
 	struct rdomain		*rd;
+	struct as_set		*aset;
 	struct prefixset	*ps;
-	struct prefixset_item	*psi;
+	struct prefixset_item	*psi, *npsi;
 
 	if (reconfpending) {
 		log_info("previous reload still running");
@@ -453,8 +452,19 @@ reconfigure(char *conffile, struct bgpd_config *conf, struct peer **peer_l)
 		return (1);
 	}
 
+	if (prepare_listeners(conf) == -1) {
+		reconfpending = 0;
+		return (1);
+	}
+
+	if (control_setup(conf) == -1) {
+		reconfpending = 0;
+		return (1);
+	}
+
+	expand_networks(conf);
+
 	cflags = conf->flags;
-	prepare_listeners(conf);
 
 	/* start reconfiguration */
 	if (imsg_compose(ibuf_se, IMSG_RECONF_CONF, 0, 0, -1,
@@ -470,9 +480,6 @@ reconfigure(char *conffile, struct bgpd_config *conf, struct peer **peer_l)
 			return (-1);
 		la->fd = -1;
 	}
-
-	if (control_setup(conf) == -1)
-		return (-1);
 
 	/* adjust fib syncing on reload */
 	ktable_preload();
@@ -500,23 +507,107 @@ reconfigure(char *conffile, struct bgpd_config *conf, struct peer **peer_l)
 	}
 
 	/* networks go via kroute to the RDE */
-	if (kr_net_reload(0, &conf->networks))
+	if (kr_net_reload(conf->default_tableid, &conf->networks))
 		return (-1);
 
 	/* prefixsets for filters in the RDE */
-	while ((ps = SIMPLEQ_FIRST(conf->prefixsets)) != NULL) {
-		SIMPLEQ_REMOVE_HEAD(conf->prefixsets, entry);
-		if (imsg_compose(ibuf_rde, IMSG_RECONF_PREFIXSET, 0, 0, -1,
-		    ps, sizeof(*ps)) == -1)
+	while ((ps = SIMPLEQ_FIRST(&conf->prefixsets)) != NULL) {
+		SIMPLEQ_REMOVE_HEAD(&conf->prefixsets, entry);
+		if (imsg_compose(ibuf_rde, IMSG_RECONF_PREFIX_SET, 0, 0, -1,
+		    ps->name, sizeof(ps->name)) == -1)
 			return (-1);
-		while ((psi = SIMPLEQ_FIRST(&ps->psitems)) != NULL) {
-			SIMPLEQ_REMOVE_HEAD(&ps->psitems, entry);
-			if (imsg_compose(ibuf_rde, IMSG_RECONF_PREFIXSETITEM, 0,
-			    0, -1, psi, sizeof(*psi)) == -1)
+		RB_FOREACH_SAFE(psi, prefixset_tree, &ps->psitems, npsi) {
+			RB_REMOVE(prefixset_tree, &ps->psitems, psi);
+			if (imsg_compose(ibuf_rde, IMSG_RECONF_PREFIX_SET_ITEM,
+			    0, 0, -1, psi, sizeof(*psi)) == -1)
 				return (-1);
+			set_free(psi->set);
 			free(psi);
 		}
 		free(ps);
+	}
+
+	/* originsets for filters in the RDE */
+	while ((ps = SIMPLEQ_FIRST(&conf->originsets)) != NULL) {
+		SIMPLEQ_REMOVE_HEAD(&conf->originsets, entry);
+		if (imsg_compose(ibuf_rde, IMSG_RECONF_ORIGIN_SET, 0, 0, -1,
+		    ps->name, sizeof(ps->name)) == -1)
+			return (-1);
+		RB_FOREACH_SAFE(psi, prefixset_tree, &ps->psitems, npsi) {
+			struct roa_set *rs;
+			size_t i, l, n;
+			RB_REMOVE(prefixset_tree, &ps->psitems, psi);
+			rs = set_get(psi->set, &n);
+			for (i = 0; i < n; i += l) {
+				l = (n - i > 1024 ? 1024 : n - i);
+				if (imsg_compose(ibuf_rde,
+				    IMSG_RECONF_ROA_SET_ITEMS,
+				    0, 0, -1, rs + i, l * sizeof(*rs)) == -1)
+					return -1;
+			}
+			if (imsg_compose(ibuf_rde, IMSG_RECONF_PREFIX_SET_ITEM,
+			    0, 0, -1, psi, sizeof(*psi)) == -1)
+				return (-1);
+			set_free(psi->set);
+			free(psi);
+		}
+		free(ps);
+	}
+
+	if (!RB_EMPTY(&conf->roa)) {
+		if (imsg_compose(ibuf_rde, IMSG_RECONF_ROA_SET, 0, 0, -1,
+		    NULL, 0) == -1)
+			return (-1);
+		RB_FOREACH_SAFE(psi, prefixset_tree, &conf->roa, npsi) {
+			struct roa_set *rs;
+			size_t i, l, n;
+			RB_REMOVE(prefixset_tree, &conf->roa, psi);
+			rs = set_get(psi->set, &n);
+			for (i = 0; i < n; i += l) {
+				l = (n - i > 1024 ? 1024 : n - i);
+				if (imsg_compose(ibuf_rde,
+				    IMSG_RECONF_ROA_SET_ITEMS,
+				    0, 0, -1, rs + i, l * sizeof(*rs)) == -1)
+					return -1;
+			}
+			if (imsg_compose(ibuf_rde, IMSG_RECONF_PREFIX_SET_ITEM,
+			    0, 0, -1, psi, sizeof(*psi)) == -1)
+				return (-1);
+			set_free(psi->set);
+			free(psi);
+		}
+	}
+
+	/* as-sets for filters in the RDE */
+	while ((aset = SIMPLEQ_FIRST(conf->as_sets)) != NULL) {
+		struct ibuf *wbuf;
+		u_int32_t *as;
+		size_t i, l, n;
+
+		SIMPLEQ_REMOVE_HEAD(conf->as_sets, entry);
+
+		as = set_get(aset->set, &n);
+		if ((wbuf = imsg_create(ibuf_rde, IMSG_RECONF_AS_SET, 0, 0,
+		    sizeof(n) + sizeof(aset->name))) == NULL)
+			return -1;
+		if (imsg_add(wbuf, &n, sizeof(n)) == -1 ||
+		    imsg_add(wbuf, aset->name, sizeof(aset->name)) == -1)
+			return -1;
+		imsg_close(ibuf_rde, wbuf);
+
+		for (i = 0; i < n; i += l) {
+			l = (n - i > 1024 ? 1024 : n - i);
+			if (imsg_compose(ibuf_rde, IMSG_RECONF_AS_SET_ITEMS,
+			    0, 0, -1, as + i, l * sizeof(*as)) == -1)
+				return -1;
+		}
+
+		if (imsg_compose(ibuf_rde, IMSG_RECONF_AS_SET_DONE, 0, 0, -1,
+		    NULL, 0) == -1)
+			return -1;
+		
+		set_free(aset->set);
+		free(aset);
 	}
 
 	/* filters for the RDE */
@@ -570,8 +661,10 @@ reconfigure(char *conffile, struct bgpd_config *conf, struct peer **peer_l)
 		free(rd);
 	}
 
-	/* signal the SE first then the RDE to activate the new config */
-	if (imsg_compose(ibuf_se, IMSG_RECONF_DONE, 0, 0, -1, NULL, 0) == -1)
+	/* send a drain message to know when all messages where processed */
+	if (imsg_compose(ibuf_se, IMSG_RECONF_DRAIN, 0, 0, -1, NULL, 0) == -1)
+		return (-1);
+	if (imsg_compose(ibuf_rde, IMSG_RECONF_DRAIN, 0, 0, -1, NULL, 0) == -1)
 		return (-1);
 
 	/* mrt changes can be sent out of bound */
@@ -723,9 +816,11 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			log_setverbose(verbose);
 			break;
 		case IMSG_RECONF_DONE:
-			if (reconfpending == 0)
+			if (reconfpending == 0) {
 				log_warnx("unexpected RECONF_DONE received");
-			else if (reconfpending == 2) {
+				break;
+			}
+			if (idx == PFD_PIPE_SESSION) {
 				imsg_compose(ibuf_rde, IMSG_RECONF_DONE, 0,
 				    0, -1, NULL, 0);
 
@@ -736,6 +831,22 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				kr_reload();
 			}
 			reconfpending--;
+			break;
+		case IMSG_RECONF_DRAIN:
+			if (reconfpending == 0) {
+				log_warnx("unexpected RECONF_DRAIN received");
+				break;
+			}
+			reconfpending--;
+			if (reconfpending == 0) {
+				/*
+				 * SE goes first to bring templated neighbors
+				 * in sync.
+				 */
+				imsg_compose(ibuf_se, IMSG_RECONF_DONE, 0,
+				    0, -1, NULL, 0);
+				reconfpending = 2; /* expecting 2 DONE msg */
+			}
 			break;
 		default:
 			break;
@@ -828,11 +939,12 @@ control_setup(struct bgpd_config *conf)
 	/* control socket is outside chroot */
 	if (!cname || strcmp(cname, conf->csock)) {
 		if (cname) {
-			control_cleanup(cname);
 			free(cname);
 		}
 		if ((cname = strdup(conf->csock)) == NULL)
 			fatal("strdup");
+		if (control_check(cname) == -1)
+			return (-1);
 		if ((fd = control_init(0, cname)) == -1)
 			fatalx("control socket setup failed");
 		if (control_listen(fd) == -1)
@@ -844,16 +956,16 @@ control_setup(struct bgpd_config *conf)
 	}
 	if (!conf->rcsock) {
 		/* remove restricted socket */
-		control_cleanup(rcname);
 		free(rcname);
 		rcname = NULL;
 	} else if (!rcname || strcmp(rcname, conf->rcsock)) {
 		if (rcname) {
-			control_cleanup(rcname);
 			free(rcname);
 		}
 		if ((rcname = strdup(conf->rcsock)) == NULL)
 			fatal("strdup");
+		if (control_check(rcname) == -1)
+			return (-1);
 		if ((fd = control_init(1, rcname)) == -1)
 			fatalx("control socket setup failed");
 		if (control_listen(fd) == -1)
@@ -880,7 +992,7 @@ set_pollfd(struct pollfd *pfd, struct imsgbuf *i)
 }
 
 int
-handle_pollfd(struct pollfd *pfd, struct imsgbuf *i)  
+handle_pollfd(struct pollfd *pfd, struct imsgbuf *i)
 {
 	ssize_t n;
 

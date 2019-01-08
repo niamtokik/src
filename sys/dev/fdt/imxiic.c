@@ -1,4 +1,4 @@
-/* $OpenBSD: imxiic.c,v 1.3 2018/05/18 15:58:17 kettenis Exp $ */
+/* $OpenBSD: imxiic.c,v 1.7 2018/12/23 22:48:19 patrick Exp $ */
 /*
  * Copyright (c) 2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -54,6 +54,7 @@ struct imxiic_softc {
 	bus_size_t		sc_ios;
 	void			*sc_ih;
 	int			sc_node;
+	int			sc_bitrate;
 
 	struct rwlock		sc_buslock;
 	struct i2c_controller	i2c_tag;
@@ -70,7 +71,8 @@ void imxiic_setspeed(struct imxiic_softc *, u_int);
 int imxiic_intr(void *);
 int imxiic_wait_intr(struct imxiic_softc *, int, int);
 int imxiic_wait_state(struct imxiic_softc *, uint32_t, uint32_t);
-int imxiic_read(struct imxiic_softc *, int, void *, int);
+int imxiic_read(struct imxiic_softc *, int, const void *, int,
+    void *, int);
 int imxiic_write(struct imxiic_softc *, int, const void *, int,
     const void *, int);
 
@@ -124,17 +126,19 @@ imxiic_attach(struct device *parent, struct device *self, void *aux)
 		panic("imxiic_attach: bus_space_map failed!");
 
 #if 0
-	sc->sc_ih = arm_intr_establish_fdt(faa->fa_node, IPL_BIO,
+	sc->sc_ih = fdt_intr_establish(faa->fa_node, IPL_BIO,
 	    imxiic_intr, sc, sc->sc_dev.dv_xname);
 #endif
 
 	printf("\n");
 
-	/* set iomux pins */
+	clock_enable(faa->fa_node, NULL);
 	pinctrl_byname(faa->fa_node, "default");
 
-	/* set speed to 100kHz */
-	imxiic_setspeed(sc, 100);
+	/* set speed */
+	sc->sc_bitrate = OF_getpropint(sc->sc_node,
+	    "clock-frequency", 100000) / 1000;
+	imxiic_setspeed(sc, sc->sc_bitrate);
 
 	/* reset */
 	HWRITE2(sc, I2C_I2CR, 0);
@@ -231,7 +235,6 @@ imxiic_wait_state(struct imxiic_softc *sc, uint32_t mask, uint32_t value)
 {
 	uint32_t state;
 	int timeout;
-	state = HREAD2(sc, I2C_I2SR);
 	for (timeout = 1000; timeout > 0; timeout--) {
 		if (((state = HREAD2(sc, I2C_I2SR)) & mask) == value)
 			return 0;
@@ -241,10 +244,22 @@ imxiic_wait_state(struct imxiic_softc *sc, uint32_t mask, uint32_t value)
 }
 
 int
-imxiic_read(struct imxiic_softc *sc, int addr, void *data, int len)
+imxiic_read(struct imxiic_softc *sc, int addr, const void *cmd, int cmdlen,
+    void *data, int len)
 {
 	int i;
 
+	if (cmdlen > 0) {
+		if (imxiic_write(sc, addr, cmd, cmdlen, NULL, 0))
+			return (EIO);
+
+		HSET2(sc, I2C_I2CR, I2C_I2CR_RSTA);
+		delay(1);
+		if (imxiic_wait_state(sc, I2C_I2SR_IBB, I2C_I2SR_IBB))
+			return (EIO);
+	}
+
+	HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
 	HWRITE2(sc, I2C_I2DR, (addr << 1) | 1);
 
 	if (imxiic_wait_state(sc, I2C_I2SR_IIF, I2C_I2SR_IIF))
@@ -284,6 +299,7 @@ imxiic_write(struct imxiic_softc *sc, int addr, const void *cmd, int cmdlen,
 {
 	int i;
 
+	HCLR2(sc, I2C_I2SR, I2C_I2SR_IIF);
 	HWRITE2(sc, I2C_I2DR, addr << 1);
 
 	if (imxiic_wait_state(sc, I2C_I2SR_IIF, I2C_I2SR_IIF))
@@ -322,8 +338,8 @@ imxiic_i2c_acquire_bus(void *cookie, int flags)
 	/* clock gating */
 	clock_enable(sc->sc_node, NULL);
 
-	/* set speed to 100kHz */
-	imxiic_setspeed(sc, 100);
+	/* set speed */
+	imxiic_setspeed(sc, sc->sc_bitrate);
 
 	/* enable the controller */
 	HWRITE2(sc, I2C_I2SR, 0);
@@ -354,8 +370,6 @@ imxiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr,
 
 	if (!I2C_OP_STOP_P(op))
 		return EINVAL;
-	if (I2C_OP_READ_P(op) && cmdlen > 0)
-		return EINVAL;
 
 	/* start transaction */
 	HSET2(sc, I2C_I2CR, I2C_I2CR_MSTA);
@@ -370,7 +384,7 @@ imxiic_i2c_exec(void *cookie, i2c_op_t op, i2c_addr_t addr,
 	HSET2(sc, I2C_I2CR, I2C_I2CR_IIEN | I2C_I2CR_MTX | I2C_I2CR_TXAK);
 
 	if (I2C_OP_READ_P(op)) {
-		ret = imxiic_read(sc, addr, buf, len);
+		ret = imxiic_read(sc, addr, cmdbuf, cmdlen, buf, len);
 	} else {
 		ret = imxiic_write(sc, addr, cmdbuf, cmdlen, buf, len);
 	}

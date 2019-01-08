@@ -1,4 +1,4 @@
-/* $OpenBSD: i8253.c,v 1.24 2018/04/27 08:57:13 mlarkin Exp $ */
+/* $OpenBSD: i8253.c,v 1.29 2018/12/10 21:24:22 claudio Exp $ */
 /*
  * Copyright (c) 2016 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -137,7 +137,7 @@ i8253_do_readback(uint32_t data)
 uint8_t
 vcpu_exit_i8253_misc(struct vm_run_params *vrp)
 {
-	union vm_exit *vei = vrp->vrp_exit;
+	struct vm_exit *vei = vrp->vrp_exit;
 	uint16_t cur;
 	uint64_t ns, ticks;
 	struct timespec now, delta;
@@ -170,7 +170,7 @@ vcpu_exit_i8253_misc(struct vm_run_params *vrp)
 			}
 		}
 	} else {
-		log_debug("%s: discarding data written to PIT misc port\n",
+		log_debug("%s: discarding data written to PIT misc port",
 		    __func__);
 	}
 
@@ -194,11 +194,10 @@ uint8_t
 vcpu_exit_i8253(struct vm_run_params *vrp)
 {
 	uint32_t out_data;
-	uint16_t ul;
 	uint8_t sel, rw, data;
 	uint64_t ns, ticks;
 	struct timespec now, delta;
-	union vm_exit *vei = vrp->vrp_exit;
+	struct vm_exit *vei = vrp->vrp_exit;
 
 	get_input_data(vei, &out_data);
 
@@ -283,23 +282,12 @@ vcpu_exit_i8253(struct vm_run_params *vrp)
 				goto ret;
 			}
 
-			/* Unlatched read mode */
-			clock_gettime(CLOCK_MONOTONIC, &now);
-			timespecsub(&now, &i8253_channel[sel].ts, &delta);
-			ns = delta.tv_sec * 1000000000 + delta.tv_nsec;
-			ticks = ns / NS_PER_TICK;
-			if (i8253_channel[sel].start) {
-				ul = i8253_channel[sel].start -
-				    ticks % i8253_channel[sel].start;
-			} else
-				ul = 0;
-
 			if (i8253_channel[sel].last_r == 0) {
-				data = ul >> 8;
+				data = i8253_channel[sel].olatch >> 8;
 				set_return_data(vei, data);
 				i8253_channel[sel].last_r = 1;
 			} else {
-				data = ul & 0xFF;
+				data = i8253_channel[sel].olatch & 0xFF;
 				set_return_data(vei, data);
 				i8253_channel[sel].last_r = 0;
 			}
@@ -351,6 +339,7 @@ i8253_fire(int fd, short type, void *arg)
 	struct i8253_channel *ctr = (struct i8253_channel *)arg;
 
 	vcpu_assert_pic_irq(ctr->vm_id, 0, 0);
+	vcpu_deassert_pic_irq(ctr->vm_id, 0, 0);
 
 	if (ctr->mode != TIMER_INTTC) {
 		timerclear(&tv);
@@ -406,6 +395,6 @@ i8253_start()
 {
 	int i;
 	for (i = 0; i < 3; i++)
-		if(i8253_channel[i].in_use)
+		if (i8253_channel[i].in_use)
 			i8253_reset(i);
 }

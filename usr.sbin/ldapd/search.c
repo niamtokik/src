@@ -1,4 +1,4 @@
-/*	$OpenBSD: search.c,v 1.22 2018/05/18 12:36:30 reyk Exp $ */
+/*	$OpenBSD: search.c,v 1.24 2018/12/05 06:44:09 claudio Exp $ */
 
 /*
  * Copyright (c) 2009, 2010 Martin Hedenfalk <martin@bzero.se>
@@ -140,7 +140,7 @@ search_result(const char *dn, size_t dnlen, struct ber_element *attrs,
 	}
 
 	elm = ber_printf_elements(root, "i{txe", search->req->msgid,
-		BER_CLASS_APP, (unsigned long)LDAP_RES_SEARCH_ENTRY,
+		BER_CLASS_APP, LDAP_RES_SEARCH_ENTRY,
 		dn, dnlen, filtered_attrs);
 	if (elm == NULL)
 		goto fail;
@@ -322,7 +322,8 @@ conn_search(struct search *search)
 		if (search->plan->indexed) {
 			search->cindx = TAILQ_FIRST(&search->plan->indices);
 			key.data = search->cindx->prefix;
-			log_debug("init index scan on [%s]", key.data);
+			log_debug("init index scan on [%s]",
+			    search->cindx->prefix);
 		} else {
 			if (*search->basedn)
 				key.data = search->basedn;
@@ -342,7 +343,8 @@ conn_search(struct search *search)
 		op = BT_NEXT;
 
 		if (rc == BT_SUCCESS && search->plan->indexed) {
-			log_debug("found index %.*s", (int)key.size, key.data);
+			log_debug("found index %.*s", (int)key.size,
+			    (char *)key.data);
 
 			if (!has_prefix(&key, search->cindx->prefix)) {
 				log_debug("scanned past index prefix [%s]",
@@ -362,7 +364,8 @@ conn_search(struct search *search)
 				memset(&key, 0, sizeof(key));
 				key.data = search->cindx->prefix;
 				key.size = strlen(key.data);
-				log_debug("re-init cursor on [%s]", key.data);
+				log_debug("re-init cursor on [%s]",
+				    search->cindx->prefix);
 				op = BT_CURSOR;
 				continue;
 			}
@@ -678,7 +681,7 @@ static struct plan *
 search_planner(struct namespace *ns, struct ber_element *filter)
 {
 	int			 class;
-	unsigned long		 type;
+	unsigned int		 type;
 	char			*s, *attr;
 	struct ber_element	*elm;
 	struct index		*indx;
@@ -815,7 +818,7 @@ search_planner(struct namespace *ns, struct ber_element *filter)
 		break;
 
 	default:
-		log_warnx("filter type %lu not implemented", filter->be_type);
+		log_warnx("filter type %u not implemented", filter->be_type);
 		plan->undefined = 1;
 		break;
 	}

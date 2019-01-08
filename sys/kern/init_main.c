@@ -1,4 +1,4 @@
-/*	$OpenBSD: init_main.c,v 1.277 2018/04/28 03:13:04 visa Exp $	*/
+/*	$OpenBSD: init_main.c,v 1.282 2019/01/01 07:06:44 jsg Exp $	*/
 /*	$NetBSD: init_main.c,v 1.84.4.1 1996/06/02 09:08:06 mrg Exp $	*/
 
 /*
@@ -106,7 +106,7 @@ extern void nfs_init(void);
 const char	copyright[] =
 "Copyright (c) 1982, 1986, 1989, 1991, 1993\n"
 "\tThe Regents of the University of California.  All rights reserved.\n"
-"Copyright (c) 1995-2018 OpenBSD. All rights reserved.  https://www.OpenBSD.org\n";
+"Copyright (c) 1995-2019 OpenBSD. All rights reserved.  https://www.OpenBSD.org\n";
 
 /* Components of the first process -- never freed. */
 struct	session session0;
@@ -137,9 +137,6 @@ long	__guard_local __attribute__((section(".openbsd.randomdata")));
 int	main(void *);
 void	check_console(struct proc *);
 void	start_init(void *);
-void	start_cleaner(void *);
-void	start_update(void *);
-void	start_reaper(void *);
 void	crypto_init(void);
 void	db_ctf_init(void);
 void	prof_init(void);
@@ -159,7 +156,6 @@ extern char *syscallnames[];
 struct emul emul_native = {
 	"native",
 	NULL,
-	sendsig,
 	SYS_syscall,
 	SYS_MAXSYSCALL,
 	sysent,
@@ -175,10 +171,12 @@ struct emul emul_native = {
 	NULL,		/* coredump */
 	sigcode,
 	esigcode,
-	sigcoderet,
-	EMUL_ENABLED | EMUL_NATIVE,
+	sigcoderet
 };
 
+#ifdef DIAGNOSTIC
+int pdevinit_done = 0;
+#endif
 
 /*
  * System startup; initialize the world, create process 0, mount root
@@ -406,6 +404,9 @@ main(void *framep)
 	for (pdev = pdevinit; pdev->pdev_attach != NULL; pdev++)
 		if (pdev->pdev_count > 0)
 			(*pdev->pdev_attach)(pdev->pdev_count);
+#ifdef DIAGNOSTIC
+	pdevinit_done = 1;
+#endif
 
 #ifdef CRYPTO
 	crypto_init();
@@ -526,15 +527,15 @@ main(void *framep)
 		panic("fork pagedaemon");
 
 	/* Create the reaper daemon kernel thread. */
-	if (kthread_create(start_reaper, NULL, &reaperproc, "reaper"))
+	if (kthread_create(reaper, NULL, &reaperproc, "reaper"))
 		panic("fork reaper");
 
 	/* Create the cleaner daemon kernel thread. */
-	if (kthread_create(start_cleaner, NULL, NULL, "cleaner"))
+	if (kthread_create(buf_daemon, NULL, &cleanerproc, "cleaner"))
 		panic("fork cleaner");
 
 	/* Create the update daemon kernel thread. */
-	if (kthread_create(start_update, NULL, NULL, "update"))
+	if (kthread_create(syncer_thread, NULL, &syncerproc, "update"))
 		panic("fork update");
 
 	/* Create the aiodone daemon kernel thread. */ 
@@ -746,25 +747,4 @@ start_init(void *arg)
 	}
 	printf("init: not found\n");
 	panic("no init");
-}
-
-void
-start_update(void *arg)
-{
-	sched_sync(curproc);
-	/* NOTREACHED */
-}
-
-void
-start_cleaner(void *arg)
-{
-	buf_daemon(curproc);
-	/* NOTREACHED */
-}
-
-void
-start_reaper(void *arg)
-{
-	reaper();
-	/* NOTREACHED */
 }

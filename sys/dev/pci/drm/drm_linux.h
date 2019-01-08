@@ -1,4 +1,4 @@
-/*	$OpenBSD: drm_linux.h,v 1.88 2018/04/25 01:27:46 jsg Exp $	*/
+/*	$OpenBSD: drm_linux.h,v 1.92 2018/10/31 08:50:25 kettenis Exp $	*/
 /*
  * Copyright (c) 2013, 2014, 2015 Mark Kettenis
  * Copyright (c) 2017 Martin Pieuchot
@@ -22,6 +22,7 @@
 #include <sys/param.h>
 #include <sys/atomic.h>
 #include <sys/errno.h>
+#include <sys/fcntl.h>
 #include <sys/kernel.h>
 #include <sys/signalvar.h>
 #include <sys/stdint.h>
@@ -897,8 +898,8 @@ void flush_delayed_work(struct delayed_work *);
 typedef void *async_cookie_t;
 #define async_schedule(func, data)	(func)((data), NULL)
 
-#define local_irq_disable()	disable_intr()
-#define local_irq_enable()	enable_intr()
+#define local_irq_disable()	intr_disable()
+#define local_irq_enable()	intr_enable()
 
 #define setup_timer(x, y, z)	timeout_set((x), (void (*)(void *))(y), (void *)(z))
 #define mod_timer(x, y)		timeout_add((x), (y - jiffies))
@@ -2119,6 +2120,26 @@ typedef int pgprot_t;
 #define pgprot_val(v)	(v)
 #define PAGE_KERNEL	0
 
+static inline pgprot_t
+pgprot_writecombine(pgprot_t prot)
+{
+#if PMAP_WC != 0
+	return prot | PMAP_WC;
+#else
+	return prot | PMAP_NOCACHE;
+#endif
+}
+
+static inline pgprot_t
+pgprot_noncached(pgprot_t prot)
+{
+#if PMAP_DEVICE != 0
+	return prot | PMAP_DEVICE;
+#else
+	return prot | PMAP_NOCACHE;
+#endif
+}
+
 void	*kmap(struct vm_page *);
 void	 kunmap(void *addr);
 void	*vmap(struct vm_page **, unsigned int, unsigned long, pgprot_t);
@@ -2713,5 +2734,39 @@ release_firmware(const struct firmware *fw)
 }
 
 void *memchr_inv(const void *, int, size_t);
+
+struct dma_buf_ops;
+
+struct dma_buf {
+	const struct dma_buf_ops *ops;
+	void *priv;
+	size_t size;
+	struct file *file;
+};
+
+struct dma_buf_attachment;
+
+void	get_dma_buf(struct dma_buf *);
+struct dma_buf *dma_buf_get(int);
+void	dma_buf_put(struct dma_buf *);
+int	dma_buf_fd(struct dma_buf *, int);
+
+struct dma_buf_ops {
+	void (*release)(struct dma_buf *);
+};
+
+struct dma_buf_export_info {
+	const struct dma_buf_ops *ops;
+	size_t size;
+	int flags;
+	void *priv;
+};
+
+#define DEFINE_DMA_BUF_EXPORT_INFO(x)  struct dma_buf_export_info x 
+
+struct dma_buf *dma_buf_export(const struct dma_buf_export_info *);
+
+#define dma_buf_attach(x, y) NULL
+#define dma_buf_detach(x, y) panic("dma_buf_detach")
 
 #endif

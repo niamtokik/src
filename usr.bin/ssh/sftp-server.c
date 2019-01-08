@@ -1,4 +1,4 @@
-/* $OpenBSD: sftp-server.c,v 1.111 2017/04/04 00:24:56 djm Exp $ */
+/* $OpenBSD: sftp-server.c,v 1.113 2019/01/01 23:10:53 djm Exp $ */
 /*
  * Copyright (c) 2000-2004 Markus Friedl.  All rights reserved.
  *
@@ -109,7 +109,7 @@ struct sftp_handler {
 	int does_write;		/* if nonzero, banned for readonly mode */
 };
 
-struct sftp_handler handlers[] = {
+static const struct sftp_handler handlers[] = {
 	/* NB. SSH2_FXP_OPEN does the readonly check in the handler itself */
 	{ "open", NULL, SSH2_FXP_OPEN, process_open, 0 },
 	{ "close", NULL, SSH2_FXP_CLOSE, process_close, 0 },
@@ -133,7 +133,7 @@ struct sftp_handler handlers[] = {
 };
 
 /* SSH2_FXP_EXTENDED submessages */
-struct sftp_handler extended_handlers[] = {
+static const struct sftp_handler extended_handlers[] = {
 	{ "posix-rename", "posix-rename@openssh.com", 0,
 	   process_extended_posix_rename, 1 },
 	{ "statvfs", "statvfs@openssh.com", 0, process_extended_statvfs, 0 },
@@ -144,7 +144,7 @@ struct sftp_handler extended_handlers[] = {
 };
 
 static int
-request_permitted(struct sftp_handler *h)
+request_permitted(const struct sftp_handler *h)
 {
 	char *result;
 
@@ -277,9 +277,9 @@ enum {
 	HANDLE_FILE
 };
 
-Handle *handles = NULL;
-u_int num_handles = 0;
-int first_unused_handle = -1;
+static Handle *handles = NULL;
+static u_int num_handles = 0;
+static int first_unused_handle = -1;
 
 static void handle_unused(int i)
 {
@@ -1476,7 +1476,7 @@ sftp_server_main(int argc, char **argv, struct passwd *user_pw)
 	int i, r, in, out, max, ch, skipargs = 0, log_stderr = 0;
 	ssize_t len, olen, set_size;
 	SyslogFacility log_facility = SYSLOG_FACILITY_AUTH;
-	char *cp, *homedir = NULL, buf[4*4096];
+	char *cp, *homedir = NULL, uidstr[32], buf[4*4096];
 	long mask;
 
 	extern char *optarg;
@@ -1526,8 +1526,10 @@ sftp_server_main(int argc, char **argv, struct passwd *user_pw)
 			break;
 		case 'd':
 			cp = tilde_expand_filename(optarg, user_pw->pw_uid);
+			snprintf(uidstr, sizeof(uidstr), "%llu",
+			    (unsigned long long)pw->pw_uid);
 			homedir = percent_expand(cp, "d", user_pw->pw_dir,
-			    "u", user_pw->pw_name, (char *)NULL);
+			    "u", user_pw->pw_name, "U", uidstr, (char *)NULL);
 			free(cp);
 			break;
 		case 'p':

@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_vnops.c,v 1.176 2018/05/05 11:54:11 mpi Exp $	*/
+/*	$OpenBSD: nfs_vnops.c,v 1.179 2018/07/02 20:56:22 bluhm Exp $	*/
 /*	$NetBSD: nfs_vnops.c,v 1.62.4.1 1996/07/08 20:26:52 jtc Exp $	*/
 
 /*
@@ -1401,7 +1401,6 @@ nfs_mknod(void *v)
 		vput(newvp);
 
 	VN_KNOTE(ap->a_dvp, NOTE_WRITE);
-	vput(ap->a_dvp);
 
 	return (error);
 }
@@ -1427,11 +1426,8 @@ nfs_create(void *v)
 	/*
 	 * Oops, not for me..
 	 */
-	if (vap->va_type == VSOCK) {
-		error = nfs_mknodrpc(dvp, ap->a_vpp, cnp, vap);
-		vput(dvp);
-		return (error);
-	}
+	if (vap->va_type == VSOCK)
+		return (nfs_mknodrpc(dvp, ap->a_vpp, cnp, vap));
 
 	if (vap->va_vaflags & VA_EXCLUSIVE)
 		fmode |= O_EXCL;
@@ -1502,7 +1498,6 @@ nfsmout:
 	if (!wccflag)
 		NFS_INVALIDATE_ATTRCACHE(VTONFS(dvp));
 	VN_KNOTE(ap->a_dvp, NOTE_WRITE);
-	vput(dvp);
 	return (error);
 }
 
@@ -1979,13 +1974,6 @@ nfs_rmdir(void *v)
 	int error = 0, wccflag = NFSV3_WCCRATTR;
 
 	info.nmi_v3 = NFS_ISV3(dvp);
-
-	if (dvp == vp) {
-		vrele(dvp);
-		vput(dvp);
-		pool_put(&namei_pool, cnp->cn_pnbuf);
-		return (EINVAL);
-	}
 
 	nfsstats.rpccnt[NFSPROC_RMDIR]++;
 	info.nmi_mb = info.nmi_mreq = nfsm_reqhead(NFSX_FH(info.nmi_v3) +
@@ -2879,18 +2867,15 @@ again:
 	bvecpos = 0;
 	if (NFS_ISV3(vp) && commit) {
 		s = splbio();
-		for (bp = LIST_FIRST(&vp->v_dirtyblkhd); bp != NULL; bp = nbp) {
+		LIST_FOREACH_SAFE(bp, &vp->v_dirtyblkhd, b_vnbufs, nbp) {
 			if (bvecpos >= NFS_COMMITBVECSIZ)
 				break;
 			if ((bp->b_flags & (B_BUSY | B_DELWRI | B_NEEDCOMMIT))
-			    != (B_DELWRI | B_NEEDCOMMIT)) {
-				nbp = LIST_NEXT(bp, b_vnbufs);
+			    != (B_DELWRI | B_NEEDCOMMIT))
 				continue;
-			}
 			bremfree(bp);
 			bp->b_flags |= B_WRITEINPROG;
 			buf_acquire(bp);
-			nbp = LIST_NEXT(bp, b_vnbufs);
 
 			/*
 			 * A list of these buffers is kept so that the
@@ -2951,8 +2936,7 @@ again:
 	 */
 loop:
 	s = splbio();
-	for (bp = LIST_FIRST(&vp->v_dirtyblkhd); bp != NULL; bp = nbp) {
-		nbp = LIST_NEXT(bp, b_vnbufs);
+	LIST_FOREACH_SAFE(bp, &vp->v_dirtyblkhd, b_vnbufs, nbp) {
 		if (bp->b_flags & B_BUSY) {
 			if (waitfor != MNT_WAIT || passone)
 				continue;
@@ -3005,7 +2989,7 @@ loop:
 			goto loop2;
 		}
 
-		if (LIST_FIRST(&vp->v_dirtyblkhd) && commit) {
+		if (!LIST_EMPTY(&vp->v_dirtyblkhd) && commit) {
 #if 0
 			vprint("nfs_fsync: dirty", vp);
 #endif

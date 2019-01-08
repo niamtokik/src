@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.21 2018/05/19 16:27:07 bluhm Exp $
+#	$OpenBSD: Makefile,v 1.24 2018/09/28 18:57:37 bluhm Exp $
 
 # This test needs a manual setup of four machines, the make
 # target create-setup can be used to distribute the configuration.
@@ -211,6 +211,14 @@ stamp-pfctl: addr.py pf.conf
 	    ssh ${IPS_SSH} ${SUDO} pfctl -a regress -f -
 	@date >$@
 
+stamp-reflect: nonxt-reflect
+	@echo '\n======== $@ ========'
+	ssh ${IPS_SSH} make -C ${.CURDIR} nonxt-reflect
+	ssh ${IPS_SSH} ${SUDO} rcctl start inetd nonxt_reflect
+	-ssh ${ECO_SSH} make -C ${.CURDIR} nonxt-reflect
+	ssh ${ECO_SSH} ${SUDO} rcctl start inetd nonxt_reflect
+	@date >$@
+
 DUMPCMD=	tcpdump -l -e -vvv -s 2048 -ni
 
 # Run tcpdump on enc device of IPS machine.
@@ -364,9 +372,7 @@ run-regress-send-tcp-${host}_${sec}_${mode}_${ipv}:
 # Send no next header protocol 59 packets through the IPsec test.
 # They consist solely of an IPv6 header chain and trigger edge cases.
 
-# Deactivate for now until the raw IP reflector can be build and
-# started reliably on remote machine.  Manually run make nonxt.
-# XXX TARGETS +=	nonxt-${host}_${sec}_${mode}_${ipv}
+TARGETS +=	nonxt-${host}_${sec}_${mode}_${ipv}
 nonxt ${host:L} ${sec:L} ${mode:L} ${ipv:L}:\
     run-regress-send-nonxt-${host}_${sec}_${mode}_${ipv}
 run-regress-send-nonxt-${host}_${sec}_${mode}_${ipv}: nonxt-sendrecv
@@ -375,8 +381,6 @@ run-regress-send-nonxt-${host}_${sec}_${mode}_${ipv}: nonxt-sendrecv
 	    awk '/input ${sec:S/BUNDLE/ESP/} /{print $$1}' >pkt.in
 	netstat -s -p ${sec:L:S/ipip/ipencap/:S/bundle/esp/} |\
 	    awk '/output ${sec:S/BUNDLE/ESP/} /{print $$1}' >pkt.out
-	ssh ${${host}_SSH} ${SUDO}\
-	    ./nonxt-reflect ${${host}_${sec}_${mode}_${ipv}}
 	${SUDO} ./nonxt-sendrecv ${${host}_${sec}_${mode}_${ipv}}
 .if "${sec}" == IPCOMP
 	netstat -s -p ${sec:L:S/ipip/ipencap/:S/bundle/esp/} |\
@@ -488,7 +492,7 @@ REGRESS_TARGETS =	${TARGETS:S/^/run-regress-send-/} \
     ${TARGETS:N*_IPIP_*:N*_BUNDLE_*:N*_IN_*:N*_OUT_*:N*-SRC_*:Nudp-*_IPCOMP_*:Ntcp-*_IPCOMP_*:N*-small-*:Nnonxt-*_IPCOMP_*:S/-big-/-/:S/^/run-regress-bpf-/} \
     ${TARGETS:N*_IPIP_*:N*_IPCOMP_*:N*_IN_*:N*_OUT_*:N*-SRC_*:N*-small-*:S/-big-/-/:S/^/run-regress-pflog-/}
 ${REGRESS_TARGETS:Mrun-regress-send-*}: \
-    stamp-ipsec stamp-bpf stamp-pflog stamp-drop
+    stamp-ipsec stamp-reflect stamp-bpf stamp-pflog stamp-drop
 
 CLEANFILES +=	addr.py *.pyc *.log stamp-* */hostname.* *.{in,out} *.tcpdump
 
@@ -496,7 +500,7 @@ CLEANFILES +=	addr.py *.pyc *.log stamp-* */hostname.* *.{in,out} *.tcpdump
 
 .PHONY: create-setup
 
-create-setup: stamp-hostname stamp-inetd
+create-setup: stamp-hostname stamp-inetd stamp-nonxt-reflect
 
 # Create hostname.if files, copy them to the machines and install addresses.
 
@@ -763,6 +767,46 @@ stamp-inetd: ${IPS_SSH}/inetd.conf ${ECO_SSH}/inetd.conf
 .endfor
 	date >$@
 
+# Create rc.d/nonxt_reflect startup scripts,
+# copy them to the remote machines,
+# build remote nonxt-reflect binary,
+# and start nonext protocol 59 reflector daemons.
+
+.for host in IPS ECO
+${${host}_SSH}/nonxt_reflect: nonxt_reflect.sh Makefile
+	@echo '\n======== $@ ========'
+	mkdir -p ${@:H}
+	rm -f $@ $@.tmp
+	echo '#!/bin/ksh' >$@.tmp
+	echo '### regress ipsec $@' >>$@.tmp
+	echo 'local_addresses="' >>$@.tmp
+.for sec in ESP AH IPIP IPCOMP BUNDLE
+.for mode in TRANSP TUNNEL4 TUNNEL6
+.for ipv in IPV4 IPV6
+.if ! empty(${host}_${sec}_${mode}_${ipv})
+	echo '${${host}_${sec}_${mode}_${ipv}}' >>$@.tmp
+.endif
+.endfor
+.endfor
+.endfor
+	echo '"' >>$@.tmp
+	cat ${.CURDIR}/nonxt_reflect.sh >>$@.tmp
+	sh -n $@.tmp
+	chmod 755 $@.tmp
+	mv $@.tmp $@
+.endfor
+
+stamp-nonxt-reflect: ${IPS_SSH}/nonxt_reflect ${ECO_SSH}/nonxt_reflect \
+    nonxt-reflect
+	@echo '\n======== $@ ========'
+.for host in IPS ECO
+	ssh ${${host}_SSH} make -C ${.CURDIR} nonxt-reflect
+	scp ${${host}_SSH}/nonxt_reflect root@${${host}_SSH}:/etc/rc.d/
+	ssh root@${${host}_SSH}\
+	    "rcctl enable nonxt_reflect && rcctl restart nonxt_reflect"
+.endfor
+	date >$@
+
 # Check whether the address, route and remote setup is correct.
 
 .PHONY: check-setup
@@ -811,7 +855,7 @@ check-setup-src:
 
 check-setup-ips:
 	@echo '\n======== $@ ========'
-.for ping inet ipv in ping inet IPV4 ping6 inet6 IPV6
+.for ping inet ip ipv in ping inet ip IPV4 ping6 inet6 ip6 IPV6
 .for host dir in IPS IN IPS OUT IPS BUNDLE
 	ssh ${IPS_SSH} ${ping} -n -c 1 ${${host}_${dir}_${ipv}} \
 	    # ${host}_${dir}_${ipv}
@@ -845,6 +889,9 @@ check-setup-ips:
 .for host mode in IPS TRANSP IPS TUNNEL4 IPS TUNNEL6
 	ssh ${IPS_SSH} netstat -nav -f ${inet} -p udp |\
 	    fgrep ' ${${host}_${sec}_${mode}_${ipv}}.7 ' \
+	    # ${host}_${sec}_${mode}_${ipv}
+	ssh ${IPS_SSH} netstat -nav -f ${inet} -p ${ip} |\
+	    grep ' ${${host}_${sec}_${mode}_${ipv}}\.\* .* *59$$' \
 	    # ${host}_${sec}_${mode}_${ipv}
 .endfor
 .endfor
@@ -896,7 +943,7 @@ check-setup-rt:
 
 check-setup-eco:
 	@echo '\n======== $@ ========'
-.for ping inet ipv in ping inet IPV4 ping6 inet6 IPV6
+.for ping inet ip ipv in ping inet ip IPV4 ping6 inet6 ip6 IPV6
 .for host dir in ECO IN
 	ssh ${ECO_SSH} ${ping} -n -c 1 ${${host}_${dir}_${ipv}} \
 	    # ${host}_${dir}_${ipv}
@@ -924,6 +971,9 @@ check-setup-eco:
 .for host mode in ECO TUNNEL4 ECO TUNNEL6
 	ssh ${ECO_SSH} netstat -nav -f ${inet} -p udp |\
 	    fgrep ' ${${host}_${sec}_${mode}_${ipv}}.7 ' \
+	    # ${host}_${sec}_${mode}_${ipv}
+	ssh ${ECO_SSH} netstat -nav -f ${inet} -p ${ip} |\
+	    grep ' ${${host}_${sec}_${mode}_${ipv}}\.\* .* *59$$' \
 	    # ${host}_${sec}_${mode}_${ipv}
 .endfor
 .endfor

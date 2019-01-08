@@ -1,4 +1,4 @@
-/*	$OpenBSD: dhcpd.h,v 1.255 2018/05/19 22:10:22 krw Exp $	*/
+/*	$OpenBSD: dhcpd.h,v 1.263 2019/01/05 21:40:44 krw Exp $	*/
 
 /*
  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
@@ -43,6 +43,7 @@
 #define	REMOTE_PORT	67
 #define	INTERNALSIG	SIG_ATOMIC_MAX
 #define DB_TIMEFMT	"%w %Y/%m/%d %T UTC"
+#define	RT_BUF_SIZE	2048
 
 struct option_data {
 	unsigned int	 len;
@@ -118,19 +119,16 @@ struct interface_info {
 	char			 name[IFNAMSIZ];
 	char			 ssid[32];
 	uint8_t			 ssid_len;
-	int			 bfdesc; /* bpf - reading & broadcast writing*/
-	int			 ufdesc; /* udp - unicast writing */
+	int			 bpffd; /* bpf - reading & broadcast writing*/
+	int			 udpfd; /* udp - unicast writing */
 	unsigned char		*rbuf;
 	size_t			 rbuf_max;
-	size_t			 rbuf_offset;
-	size_t			 rbuf_len;
 	int			 errors;
 	uint16_t		 index;
-	int			 linkstat;
+	int			 link_state;
 	int			 rdomain;
 	int			 flags;
-#define	IFI_VALID_LLADDR	0x01
-#define IFI_IN_CHARGE		0x02
+#define IFI_IN_CHARGE		0x01
 	struct dhcp_packet	 recv_packet;
 	struct dhcp_packet	 sent_packet;
 	int			 sent_packet_length;
@@ -193,15 +191,14 @@ int		 get_udp_sock(int);
 int		 configure_bpf_sock(int);
 ssize_t		 send_packet(struct interface_info *, struct in_addr,
     struct in_addr, const char *);
-ssize_t		 receive_packet(struct interface_info *, struct sockaddr_in *,
-    struct ether_addr *);
+ssize_t		 receive_packet(unsigned char *, unsigned char *,
+    struct sockaddr_in *, struct ether_addr *, struct dhcp_packet *);
 
 /* dispatch.c */
 void		 dispatch(struct interface_info *, int);
 void		 set_timeout( struct interface_info *, time_t,
     void (*)(struct interface_info *));
 void		 cancel_timeout(struct interface_info *);
-void		 sendhup(void);
 
 /* dhclient.c */
 extern char			*path_dhclient_conf;
@@ -224,7 +221,7 @@ void		 dhcpnak(struct interface_info *, const char *);
 void		 bootreply(struct interface_info *, struct option_data *,
     const char *);
 void		 free_client_lease(struct client_lease *);
-void		 routehandler(struct interface_info *, int);
+void		 routefd_handler(struct interface_info *, int);
 
 /* packet.c */
 void		 assemble_eh_header(struct ether_addr, struct ether_header *);

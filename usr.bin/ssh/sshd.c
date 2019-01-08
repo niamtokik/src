@@ -1,4 +1,4 @@
-/* $OpenBSD: sshd.c,v 1.508 2018/04/13 03:57:26 dtucker Exp $ */
+/* $OpenBSD: sshd.c,v 1.520 2018/12/27 03:25:25 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -73,7 +73,7 @@
 #include "sshpty.h"
 #include "packet.h"
 #include "log.h"
-#include "buffer.h"
+#include "sshbuf.h"
 #include "misc.h"
 #include "match.h"
 #include "servconf.h"
@@ -81,7 +81,7 @@
 #include "compat.h"
 #include "cipher.h"
 #include "digest.h"
-#include "key.h"
+#include "sshkey.h"
 #include "kex.h"
 #include "myproposal.h"
 #include "authfile.h"
@@ -161,13 +161,6 @@ char **rexec_argv;
 int listen_socks[MAX_LISTEN_SOCKS];
 int num_listen_socks = 0;
 
-/*
- * the client's version string, passed by sshd2 in compat mode. if != NULL,
- * sshd will skip the version-number exchange
- */
-char *client_version_string = NULL;
-char *server_version_string = NULL;
-
 /* Daemon's agent connection */
 int auth_sock = -1;
 int have_agent = 0;
@@ -217,10 +210,10 @@ Authctxt *the_authctxt = NULL;
 struct sshauthopt *auth_opts = NULL;
 
 /* sshd_config buffer */
-Buffer cfg;
+struct sshbuf *cfg;
 
 /* message to be displayed after login */
-Buffer loginmsg;
+struct sshbuf *loginmsg;
 
 /* Prototypes for various functions defined later in this file. */
 void destroy_sensitive_data(void);
@@ -339,108 +332,6 @@ grace_alarm_handler(int sig)
 	    ssh_remote_ipaddr(active_state), ssh_remote_port(active_state));
 }
 
-static void
-sshd_exchange_identification(struct ssh *ssh, int sock_in, int sock_out)
-{
-	u_int i;
-	int remote_major, remote_minor;
-	char *s;
-	char buf[256];			/* Must not be larger than remote_version. */
-	char remote_version[256];	/* Must be at least as big as buf. */
-
-	xasprintf(&server_version_string, "SSH-%d.%d-%.100s%s%s\r\n",
-	    PROTOCOL_MAJOR_2, PROTOCOL_MINOR_2, SSH_VERSION,
-	    *options.version_addendum == '\0' ? "" : " ",
-	    options.version_addendum);
-
-	/* Send our protocol version identification. */
-	if (atomicio(vwrite, sock_out, server_version_string,
-	    strlen(server_version_string))
-	    != strlen(server_version_string)) {
-		logit("Could not write ident string to %s port %d",
-		    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh));
-		cleanup_exit(255);
-	}
-
-	/* Read other sides version identification. */
-	memset(buf, 0, sizeof(buf));
-	for (i = 0; i < sizeof(buf) - 1; i++) {
-		if (atomicio(read, sock_in, &buf[i], 1) != 1) {
-			logit("Did not receive identification string "
-			    "from %s port %d",
-			    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh));
-			cleanup_exit(255);
-		}
-		if (buf[i] == '\r') {
-			buf[i] = 0;
-			/* Kludge for F-Secure Macintosh < 1.0.2 */
-			if (i == 12 &&
-			    strncmp(buf, "SSH-1.5-W1.0", 12) == 0)
-				break;
-			continue;
-		}
-		if (buf[i] == '\n') {
-			buf[i] = 0;
-			break;
-		}
-	}
-	buf[sizeof(buf) - 1] = 0;
-	client_version_string = xstrdup(buf);
-
-	/*
-	 * Check that the versions match.  In future this might accept
-	 * several versions and set appropriate flags to handle them.
-	 */
-	if (sscanf(client_version_string, "SSH-%d.%d-%[^\n]\n",
-	    &remote_major, &remote_minor, remote_version) != 3) {
-		s = "Protocol mismatch.\n";
-		(void) atomicio(vwrite, sock_out, s, strlen(s));
-		logit("Bad protocol version identification '%.100s' "
-		    "from %s port %d", client_version_string,
-		    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh));
-		close(sock_in);
-		close(sock_out);
-		cleanup_exit(255);
-	}
-	debug("Client protocol version %d.%d; client software version %.100s",
-	    remote_major, remote_minor, remote_version);
-
-	ssh->compat = compat_datafellows(remote_version);
-
-	if ((ssh->compat & SSH_BUG_PROBE) != 0) {
-		logit("probed from %s port %d with %s.  Don't panic.",
-		    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh),
-		    client_version_string);
-		cleanup_exit(255);
-	}
-	if ((ssh->compat & SSH_BUG_SCANNER) != 0) {
-		logit("scanned from %s port %d with %s.  Don't panic.",
-		    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh),
-		    client_version_string);
-		cleanup_exit(255);
-	}
-	if ((ssh->compat & SSH_BUG_RSASIGMD5) != 0) {
-		logit("Client version \"%.100s\" uses unsafe RSA signature "
-		    "scheme; disabling use of RSA keys", remote_version);
-	}
-
-	chop(server_version_string);
-	debug("Local version string %.200s", server_version_string);
-
-	if (remote_major != 2 &&
-	    !(remote_major == 1 && remote_minor == 99)) {
-		s = "Protocol major versions differ.\n";
-		(void) atomicio(vwrite, sock_out, s, strlen(s));
-		close(sock_in);
-		close(sock_out);
-		logit("Protocol major versions differ for %s port %d: "
-		    "%.200s vs. %.200s",
-		    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh),
-		    server_version_string, client_version_string);
-		cleanup_exit(255);
-	}
-}
-
 /* Destroy the host and server keys.  They will no longer be needed. */
 void
 destroy_sensitive_data(void)
@@ -449,11 +340,11 @@ destroy_sensitive_data(void)
 
 	for (i = 0; i < options.num_host_key_files; i++) {
 		if (sensitive_data.host_keys[i]) {
-			key_free(sensitive_data.host_keys[i]);
+			sshkey_free(sensitive_data.host_keys[i]);
 			sensitive_data.host_keys[i] = NULL;
 		}
 		if (sensitive_data.host_certificates[i]) {
-			key_free(sensitive_data.host_certificates[i]);
+			sshkey_free(sensitive_data.host_certificates[i]);
 			sensitive_data.host_certificates[i] = NULL;
 		}
 	}
@@ -465,11 +356,16 @@ demote_sensitive_data(void)
 {
 	struct sshkey *tmp;
 	u_int i;
+	int r;
 
 	for (i = 0; i < options.num_host_key_files; i++) {
 		if (sensitive_data.host_keys[i]) {
-			tmp = key_demote(sensitive_data.host_keys[i]);
-			key_free(sensitive_data.host_keys[i]);
+			if ((r = sshkey_from_private(
+			    sensitive_data.host_keys[i], &tmp)) != 0)
+				fatal("could not demote host %s key: %s",
+				    sshkey_type(sensitive_data.host_keys[i]),
+				    ssh_err(r));
+			sshkey_free(sensitive_data.host_keys[i]);
 			sensitive_data.host_keys[i] = tmp;
 		}
 		/* Certs do not need demotion */
@@ -487,8 +383,7 @@ privsep_preauth_child(void)
 
 #ifdef GSSAPI
 	/* Cache supported mechanism OIDs for later use */
-	if (options.gss_authentication)
-		ssh_gssapi_prepare_supported_oids();
+	ssh_gssapi_prepare_supported_oids();
 #endif
 
 	/* Demote the private keys to public keys. */
@@ -609,7 +504,7 @@ privsep_postauth(Authctxt *authctxt)
 		fatal("fork of unprivileged child failed");
 	else if (pmonitor->m_pid != 0) {
 		verbose("User child is on pid %ld", (long)pmonitor->m_pid);
-		buffer_clear(&loginmsg);
+		sshbuf_reset(loginmsg);
 		monitor_clear_keystate(pmonitor);
 		monitor_child_postauth(pmonitor);
 
@@ -639,45 +534,47 @@ privsep_postauth(Authctxt *authctxt)
 	packet_set_authenticated();
 }
 
+static void
+append_hostkey_type(struct sshbuf *b, const char *s)
+{
+	int r;
+
+	if (match_pattern_list(s, options.hostkeyalgorithms, 0) != 1) {
+		debug3("%s: %s key not permitted by HostkeyAlgorithms",
+		    __func__, s);
+		return;
+	}
+	if ((r = sshbuf_putf(b, "%s%s", sshbuf_len(b) > 0 ? "," : "", s)) != 0)
+		fatal("%s: sshbuf_putf: %s", __func__, ssh_err(r));
+}
+
 static char *
 list_hostkey_types(void)
 {
-	Buffer b;
-	const char *p;
+	struct sshbuf *b;
+	struct sshkey *key;
 	char *ret;
 	u_int i;
-	struct sshkey *key;
 
-	buffer_init(&b);
+	if ((b = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
 	for (i = 0; i < options.num_host_key_files; i++) {
 		key = sensitive_data.host_keys[i];
 		if (key == NULL)
 			key = sensitive_data.host_pubkeys[i];
 		if (key == NULL)
 			continue;
-		/* Check that the key is accepted in HostkeyAlgorithms */
-		if (match_pattern_list(sshkey_ssh_name(key),
-		    options.hostkeyalgorithms, 0) != 1) {
-			debug3("%s: %s key not permitted by HostkeyAlgorithms",
-			    __func__, sshkey_ssh_name(key));
-			continue;
-		}
 		switch (key->type) {
 		case KEY_RSA:
+			/* for RSA we also support SHA2 signatures */
+			append_hostkey_type(b, "rsa-sha2-512");
+			append_hostkey_type(b, "rsa-sha2-256");
+			/* FALLTHROUGH */
 		case KEY_DSA:
 		case KEY_ECDSA:
 		case KEY_ED25519:
 		case KEY_XMSS:
-			if (buffer_len(&b) > 0)
-				buffer_append(&b, ",", 1);
-			p = key_ssh_name(key);
-			buffer_append(&b, p, strlen(p));
-
-			/* for RSA we also support SHA2 signatures */
-			if (key->type == KEY_RSA) {
-				p = ",rsa-sha2-512,rsa-sha2-256";
-				buffer_append(&b, p, strlen(p));
-			}
+			append_hostkey_type(b, sshkey_ssh_name(key));
 			break;
 		}
 		/* If the private key has a cert peer, then list that too */
@@ -686,21 +583,24 @@ list_hostkey_types(void)
 			continue;
 		switch (key->type) {
 		case KEY_RSA_CERT:
+			/* for RSA we also support SHA2 signatures */
+			append_hostkey_type(b,
+			    "rsa-sha2-512-cert-v01@openssh.com");
+			append_hostkey_type(b,
+			    "rsa-sha2-256-cert-v01@openssh.com");
+			/* FALLTHROUGH */
 		case KEY_DSA_CERT:
 		case KEY_ECDSA_CERT:
 		case KEY_ED25519_CERT:
 		case KEY_XMSS_CERT:
-			if (buffer_len(&b) > 0)
-				buffer_append(&b, ",", 1);
-			p = key_ssh_name(key);
-			buffer_append(&b, p, strlen(p));
+			append_hostkey_type(b, sshkey_ssh_name(key));
 			break;
 		}
 	}
-	if ((ret = sshbuf_dup_string(&b)) == NULL)
+	if ((ret = sshbuf_dup_string(b)) == NULL)
 		fatal("%s: sshbuf_dup_string failed", __func__);
-	buffer_free(&b);
-	debug("list_hostkey_types: %s", ret);
+	sshbuf_free(b);
+	debug("%s: %s", __func__, ret);
 	return ret;
 }
 
@@ -767,7 +667,7 @@ get_hostkey_index(struct sshkey *key, int compare, struct ssh *ssh)
 	u_int i;
 
 	for (i = 0; i < options.num_host_key_files; i++) {
-		if (key_is_cert(key)) {
+		if (sshkey_is_cert(key)) {
 			if (key == sensitive_data.host_certificates[i] ||
 			    (compare && sensitive_data.host_certificates[i] &&
 			    sshkey_equal(key,
@@ -866,7 +766,7 @@ usage(void)
 	fprintf(stderr, "%s, %s\n",
 	    SSH_VERSION,
 #ifdef WITH_OPENSSL
-	    SSLeay_version(SSLEAY_VERSION)
+	    OpenSSL_version(OPENSSL_VERSION)
 #else
 	    "without OpenSSL"
 #endif
@@ -905,27 +805,30 @@ send_rexec_state(int fd, struct sshbuf *conf)
 }
 
 static void
-recv_rexec_state(int fd, Buffer *conf)
+recv_rexec_state(int fd, struct sshbuf *conf)
 {
-	Buffer m;
-	char *cp;
-	u_int len;
+	struct sshbuf *m;
+	u_char *cp, ver;
+	size_t len;
+	int r;
 
 	debug3("%s: entering fd = %d", __func__, fd);
 
-	buffer_init(&m);
-
-	if (ssh_msg_recv(fd, &m) == -1)
+	if ((m = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
+	if (ssh_msg_recv(fd, m) == -1)
 		fatal("%s: ssh_msg_recv failed", __func__);
-	if (buffer_get_char(&m) != 0)
+	if ((r = sshbuf_get_u8(m, &ver)) != 0)
+		fatal("%s: buffer error: %s", __func__, ssh_err(r));
+	if (ver != 0)
 		fatal("%s: rexec version mismatch", __func__);
+	if ((r = sshbuf_get_string(m, &cp, &len)) != 0)
+		fatal("%s: buffer error: %s", __func__, ssh_err(r));
+	if (conf != NULL && (r = sshbuf_put(conf, cp, len)))
+		fatal("%s: buffer error: %s", __func__, ssh_err(r));
 
-	cp = buffer_get_string(&m, &len);
-	if (conf != NULL)
-		buffer_append(conf, cp, len);
 	free(cp);
-
-	buffer_free(&m);
+	sshbuf_free(m);
 
 	debug3("%s: done", __func__);
 }
@@ -1201,8 +1104,7 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 				startup_pipe = -1;
 				pid = getpid();
 				if (rexec_flag) {
-					send_rexec_state(config_s[0],
-					    &cfg);
+					send_rexec_state(config_s[0], cfg);
 					close(config_s[0]);
 				}
 				break;
@@ -1245,7 +1147,7 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 			close(startup_p[1]);
 
 			if (rexec_flag) {
-				send_rexec_state(config_s[0], &cfg);
+				send_rexec_state(config_s[0], cfg);
 				close(config_s[0]);
 				close(config_s[1]);
 			}
@@ -1469,7 +1371,7 @@ main(int ac, char **av)
 			break;
 		case 'h':
 			servconf_add_hostkey("[command-line]", 0,
-			    &options, optarg);
+			    &options, optarg, 1);
 			break;
 		case 't':
 			test_flag = 1;
@@ -1505,7 +1407,7 @@ main(int ac, char **av)
 	}
 	if (rexeced_flag || inetd_flag)
 		rexec_flag = 0;
-	if (!test_flag && (rexec_flag && (av[0] == NULL || *av[0] != '/')))
+	if (!test_flag && rexec_flag && !path_absolute(av[0]))
 		fatal("sshd re-exec requires execution with an absolute path");
 	if (rexeced_flag)
 		closefrom(REEXEC_MIN_FREE_FD);
@@ -1541,14 +1443,15 @@ main(int ac, char **av)
 		   "test mode (-T)");
 
 	/* Fetch our configuration */
-	buffer_init(&cfg);
+	if ((cfg = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
 	if (rexeced_flag)
-		recv_rexec_state(REEXEC_CONFIG_PASS_FD, &cfg);
+		recv_rexec_state(REEXEC_CONFIG_PASS_FD, cfg);
 	else if (strcasecmp(config_file_name, "none") != 0)
-		load_server_config(config_file_name, &cfg);
+		load_server_config(config_file_name, cfg);
 
 	parse_server_config(&options, rexeced_flag ? "rexec" : config_file_name,
-	    &cfg, NULL);
+	    cfg, NULL);
 
 	/* Fill in default values for those options not explicitly set. */
 	fill_default_server_options(&options);
@@ -1594,7 +1497,7 @@ main(int ac, char **av)
 
 	debug("sshd version %s, %s", SSH_VERSION,
 #ifdef WITH_OPENSSL
-	    SSLeay_version(SSLEAY_VERSION)
+	    OpenSSL_version(OPENSSL_VERSION)
 #else
 	    "without OpenSSL"
 #endif
@@ -1618,13 +1521,23 @@ main(int ac, char **av)
 	}
 
 	for (i = 0; i < options.num_host_key_files; i++) {
+		int ll = options.host_key_file_userprovided[i] ?
+		    SYSLOG_LEVEL_ERROR : SYSLOG_LEVEL_DEBUG1;
+
 		if (options.host_key_files[i] == NULL)
 			continue;
-		key = key_load_private(options.host_key_files[i], "", NULL);
-		pubkey = key_load_public(options.host_key_files[i], NULL);
-
+		if ((r = sshkey_load_private(options.host_key_files[i], "",
+		    &key, NULL)) != 0 && r != SSH_ERR_SYSTEM_ERROR)
+			do_log2(ll, "Unable to load host key \"%s\": %s",
+			    options.host_key_files[i], ssh_err(r));
+		if ((r = sshkey_load_public(options.host_key_files[i],
+		    &pubkey, NULL)) != 0 && r != SSH_ERR_SYSTEM_ERROR)
+			do_log2(ll, "Unable to load host key \"%s\": %s",
+			    options.host_key_files[i], ssh_err(r));
 		if (pubkey == NULL && key != NULL)
-			pubkey = key_demote(key);
+			if ((r = sshkey_from_private(key, &pubkey)) != 0)
+				fatal("Could not demote key: \"%s\": %s",
+				    options.host_key_files[i], ssh_err(r));
 		sensitive_data.host_keys[i] = key;
 		sensitive_data.host_pubkeys[i] = pubkey;
 
@@ -1634,9 +1547,9 @@ main(int ac, char **av)
 			keytype = pubkey->type;
 		} else if (key != NULL) {
 			keytype = key->type;
-			accumulate_host_timing_secret(&cfg, key);
+			accumulate_host_timing_secret(cfg, key);
 		} else {
-			error("Could not load host key: %s",
+			do_log2(ll, "Unable to load host key: %s",
 			    options.host_key_files[i]);
 			sensitive_data.host_keys[i] = NULL;
 			sensitive_data.host_pubkeys[i] = NULL;
@@ -1660,7 +1573,7 @@ main(int ac, char **av)
 		    key ? "private" : "agent", i, sshkey_ssh_name(pubkey), fp);
 		free(fp);
 	}
-	accumulate_host_timing_secret(&cfg, NULL);
+	accumulate_host_timing_secret(cfg, NULL);
 	if (!sensitive_data.have_ssh2_key) {
 		logit("sshd: no hostkeys available -- exiting.");
 		exit(1);
@@ -1678,21 +1591,21 @@ main(int ac, char **av)
 	for (i = 0; i < options.num_host_cert_files; i++) {
 		if (options.host_cert_files[i] == NULL)
 			continue;
-		key = key_load_public(options.host_cert_files[i], NULL);
-		if (key == NULL) {
-			error("Could not load host certificate: %s",
-			    options.host_cert_files[i]);
+		if ((r = sshkey_load_public(options.host_cert_files[i],
+		    &key, NULL)) != 0) {
+			error("Could not load host certificate \"%s\": %s",
+			    options.host_cert_files[i], ssh_err(r));
 			continue;
 		}
-		if (!key_is_cert(key)) {
+		if (!sshkey_is_cert(key)) {
 			error("Certificate file is not a certificate: %s",
 			    options.host_cert_files[i]);
-			key_free(key);
+			sshkey_free(key);
 			continue;
 		}
 		/* Find matching private key */
 		for (j = 0; j < options.num_host_key_files; j++) {
-			if (key_equal_public(key,
+			if (sshkey_equal_public(key,
 			    sensitive_data.host_keys[j])) {
 				sensitive_data.host_certificates[j] = key;
 				break;
@@ -1701,12 +1614,12 @@ main(int ac, char **av)
 		if (j >= options.num_host_key_files) {
 			error("No matching private key for certificate: %s",
 			    options.host_cert_files[i]);
-			key_free(key);
+			sshkey_free(key);
 			continue;
 		}
 		sensitive_data.host_certificates[j] = key;
 		debug("host certificate: #%u type %d %s", j, key->type,
-		    key_type(key));
+		    sshkey_type(key));
 	}
 
 	if (use_privsep) {
@@ -1938,7 +1851,9 @@ main(int ac, char **av)
 	if (!debug_flag)
 		alarm(options.login_grace_time);
 
-	sshd_exchange_identification(ssh, sock_in, sock_out);
+	if (kex_exchange_identification(ssh, -1, options.version_addendum) != 0)
+		cleanup_exit(255); /* error already logged */
+
 	packet_set_nonblocking();
 
 	/* allocate authentication context */
@@ -1952,7 +1867,8 @@ main(int ac, char **av)
 		fatal("allocation failed");
 
 	/* prepare buffer to collect messages to display to user after login */
-	buffer_init(&loginmsg);
+	if ((loginmsg = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
 	auth_debug_reset();
 
 	if (use_privsep) {
@@ -2030,26 +1946,21 @@ main(int ac, char **av)
 
 int
 sshd_hostkey_sign(struct sshkey *privkey, struct sshkey *pubkey,
-    u_char **signature, size_t *slen, const u_char *data, size_t dlen,
+    u_char **signature, size_t *slenp, const u_char *data, size_t dlen,
     const char *alg, u_int flag)
 {
 	int r;
-	u_int xxx_slen, xxx_dlen = dlen;
 
 	if (privkey) {
-		if (PRIVSEP(key_sign(privkey, signature, &xxx_slen, data, xxx_dlen,
-		    alg) < 0))
+		if (PRIVSEP(sshkey_sign(privkey, signature, slenp, data, dlen,
+		    alg, datafellows)) < 0)
 			fatal("%s: key_sign failed", __func__);
-		if (slen)
-			*slen = xxx_slen;
 	} else if (use_privsep) {
-		if (mm_key_sign(pubkey, signature, &xxx_slen, data, xxx_dlen,
-		    alg) < 0)
+		if (mm_sshkey_sign(pubkey, signature, slenp, data, dlen,
+		    alg, datafellows) < 0)
 			fatal("%s: pubkey_sign failed", __func__);
-		if (slen)
-			*slen = xxx_slen;
 	} else {
-		if ((r = ssh_agent_sign(auth_sock, pubkey, signature, slen,
+		if ((r = ssh_agent_sign(auth_sock, pubkey, signature, slenp,
 		    data, dlen, alg, datafellows)) != 0)
 			fatal("%s: ssh_agent_sign failed: %s",
 			    __func__, ssh_err(r));
@@ -2101,9 +2012,6 @@ do_ssh2_kex(void)
 	kex->kex[KEX_ECDH_SHA2] = kexecdh_server;
 #endif
 	kex->kex[KEX_C25519_SHA256] = kexc25519_server;
-	kex->server = 1;
-	kex->client_version_string=client_version_string;
-	kex->server_version_string=server_version_string;
 	kex->load_host_public_key=&get_hostkey_public_by_type;
 	kex->load_host_private_key=&get_hostkey_private_by_type;
 	kex->host_key_index=&get_hostkey_index;

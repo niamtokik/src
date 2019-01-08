@@ -1,4 +1,4 @@
-/*	$OpenBSD: vnode.h,v 1.145 2018/05/02 02:24:56 visa Exp $	*/
+/*	$OpenBSD: vnode.h,v 1.149 2018/12/23 10:46:51 natano Exp $	*/
 /*	$NetBSD: vnode.h,v 1.38 1996/02/29 20:59:05 cgd Exp $	*/
 
 /*
@@ -93,6 +93,7 @@ struct vnode {
 	enum	vtagtype v_tag;			/* type of underlying data */
 	u_int	v_flag;				/* vnode flags (see below) */
 	u_int   v_usecount;			/* reference count of users */
+	u_int   v_uvcount;			/* unveil references */
 	/* reference count of writers */
 	u_int   v_writecount;
 	/* Flags that can be read/written in interrupts */
@@ -585,13 +586,14 @@ struct vnode *checkalias(struct vnode *, dev_t, struct mount *);
 int	getnewvnode(enum vtagtype, struct mount *, struct vops *,
 	    struct vnode **);
 int	vaccess(enum vtype, mode_t, uid_t, gid_t, mode_t, struct ucred *);
+int	vnoperm(struct vnode *);
 void	vattr_null(struct vattr *);
 void	vdevgone(int, int, int, enum vtype);
 int	vcount(struct vnode *);
 int	vfinddev(dev_t, enum vtype, struct vnode **);
 void	vflushbuf(struct vnode *, int);
 int	vflush(struct mount *, struct vnode *, int);
-int	vget(struct vnode *, int, struct proc *);
+int	vget(struct vnode *, int);
 void	vgone(struct vnode *);
 void	vgonel(struct vnode *, struct proc *);
 int	vinvalbuf(struct vnode *, int, struct ucred *, struct proc *,
@@ -640,7 +642,7 @@ int	vn_ioctl(struct file *, u_long, caddr_t, struct proc *);
 void	vn_marktext(struct vnode *);
 
 /* vfs_sync.c */
-void	sched_sync(struct proc *);
+void	syncer_thread(void *);
 void	vn_initialize_syncerd(void);
 void	vn_syncer_add_to_worklist(struct vnode *, int);
 

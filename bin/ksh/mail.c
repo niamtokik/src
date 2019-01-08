@@ -1,4 +1,4 @@
-/*	$OpenBSD: mail.c,v 1.23 2018/04/09 17:53:36 tobias Exp $	*/
+/*	$OpenBSD: mail.c,v 1.25 2019/01/07 20:50:43 tedu Exp $	*/
 
 /*
  * Mailbox checking code by Robert J. Gibson, adapted for PD ksh by
@@ -6,6 +6,7 @@
  */
 
 #include <sys/stat.h>
+#include <sys/time.h>
 
 #include <string.h>
 #include <time.h>
@@ -30,7 +31,7 @@ typedef struct mbox {
 
 static mbox_t	*mplist;
 static mbox_t	mbox;
-static time_t	mlastchkd;	/* when mail was last checked */
+static struct	timespec mlastchkd;	/* when mail was last checked */
 static time_t	mailcheck_interval;
 
 static void	munset(mbox_t *); /* free mlist and mval */
@@ -41,22 +42,28 @@ void
 mcheck(void)
 {
 	mbox_t		*mbp;
-	time_t		 now;
+	struct timespec	 elapsed, now;
 	struct tbl	*vp;
 	struct stat	 stbuf;
+	static int	 first = 1;
 
-	now = time(NULL);
-	if (mlastchkd == 0)
-		mlastchkd = now;
-	if (now - mlastchkd >= mailcheck_interval) {
-		mlastchkd = now;
+	if (mplist)
+		mbp = mplist;
+	else if ((vp = global("MAIL")) && (vp->flag & ISSET))
+		mbp = &mbox;
+	else
+		mbp = NULL;
+	if (mbp == NULL)
+		return;
 
-		if (mplist)
-			mbp = mplist;
-		else if ((vp = global("MAIL")) && (vp->flag & ISSET))
-			mbp = &mbox;
-		else
-			mbp = NULL;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (first) {
+		mlastchkd = now;
+		first = 0;
+	}
+	timespecsub(&now, &mlastchkd, &elapsed);
+	if (elapsed.tv_sec >= mailcheck_interval) {
+		mlastchkd = now;
 
 		while (mbp) {
 			if (mbp->mb_path && stat(mbp->mb_path, &stbuf) == 0 &&

@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtio.c,v 1.60 2018/04/30 08:27:53 mlarkin Exp $	*/
+/*	$OpenBSD: virtio.c,v 1.75 2018/12/06 09:20:06 claudio Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -308,6 +308,7 @@ virtio_rnd_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		case VIRTIO_CONFIG_ISR_STATUS:
 			*data = viornd.cfg.isr_status;
 			viornd.cfg.isr_status = 0;
+			vcpu_deassert_pic_irq(viornd.vm_id, 0, viornd.irq);
 			break;
 		}
 	}
@@ -360,7 +361,7 @@ vioblk_start_read(struct vioblk_dev *dev, off_t sector, ssize_t sz)
 		goto nomem;
 	info->len = sz;
 	info->offset = sector * VIRTIO_BLK_SECTOR_SIZE;
-	info->fd = dev->fd;
+	info->file = &dev->file;
 
 	return info;
 
@@ -374,7 +375,10 @@ nomem:
 static const uint8_t *
 vioblk_finish_read(struct ioinfo *info)
 {
-	if (pread(info->fd, info->buf, info->len, info->offset) != info->len) {
+	struct virtio_backing *file;
+
+	file = info->file;
+	if (file->pread(file->p, info->buf, info->len, info->offset) != info->len) {
 		info->error = errno;
 		log_warn("vioblk read error");
 		return NULL;
@@ -384,7 +388,8 @@ vioblk_finish_read(struct ioinfo *info)
 }
 
 static struct ioinfo *
-vioblk_start_write(struct vioblk_dev *dev, off_t sector, paddr_t addr, size_t len)
+vioblk_start_write(struct vioblk_dev *dev, off_t sector,
+    paddr_t addr, size_t len)
 {
 	struct ioinfo *info;
 
@@ -396,7 +401,7 @@ vioblk_start_write(struct vioblk_dev *dev, off_t sector, paddr_t addr, size_t le
 		goto nomem;
 	info->len = len;
 	info->offset = sector * VIRTIO_BLK_SECTOR_SIZE;
-	info->fd = dev->fd;
+	info->file = &dev->file;
 
 	if (read_mem(addr, info->buf, len)) {
 		vioblk_free_info(info);
@@ -414,7 +419,10 @@ nomem:
 static int
 vioblk_finish_write(struct ioinfo *info)
 {
-	if (pwrite(info->fd, info->buf, info->len, info->offset) != info->len) {
+	struct virtio_backing *file;
+
+	file = info->file;
+	if (file->pwrite(file->p, info->buf, info->len, info->offset) != info->len) {
 		log_warn("vioblk write error");
 		return EIO;
 	}
@@ -510,10 +518,11 @@ vioblk_notifyq(struct vioblk_dev *dev)
 				struct ioinfo *info;
 				const uint8_t *secdata;
 
-				info = vioblk_start_read(dev, cmd.sector + secbias,
+				info = vioblk_start_read(dev,
+				    cmd.sector + secbias,
 				    (ssize_t)secdata_desc->len);
 
-				/* read the data (use current data descriptor) */
+				/* read the data, use current data descriptor */
 				secdata = vioblk_finish_read(info);
 				if (secdata == NULL) {
 					vioblk_free_info(info);
@@ -527,14 +536,16 @@ vioblk_notifyq(struct vioblk_dev *dev)
 					log_warnx("can't write sector "
 					    "data to gpa @ 0x%llx",
 					    secdata_desc->addr);
-					dump_descriptor_chain(desc, cmd_desc_idx);
+					dump_descriptor_chain(desc,
+					    cmd_desc_idx);
 					vioblk_free_info(info);
 					goto out;
 				}
 
 				vioblk_free_info(info);
 
-				secbias += (secdata_desc->len / VIRTIO_BLK_SECTOR_SIZE);
+				secbias += (secdata_desc->len /
+				    VIRTIO_BLK_SECTOR_SIZE);
 				secdata_desc_idx = secdata_desc->next &
 				    VIOBLK_QUEUE_MASK;
 				secdata_desc = &desc[secdata_desc_idx];
@@ -553,8 +564,10 @@ vioblk_notifyq(struct vioblk_dev *dev)
 
 			ret = 1;
 			dev->cfg.isr_status = 1;
-			used->ring[used->idx & VIOBLK_QUEUE_MASK].id = cmd_desc_idx;
-			used->ring[used->idx & VIOBLK_QUEUE_MASK].len = cmd_desc->len;
+			used->ring[used->idx & VIOBLK_QUEUE_MASK].id =
+			    cmd_desc_idx;
+			used->ring[used->idx & VIOBLK_QUEUE_MASK].len =
+			    cmd_desc->len;
 			used->idx++;
 
 			dev->vq[dev->cfg.queue_notify].last_avail = avail->idx &
@@ -585,7 +598,8 @@ vioblk_notifyq(struct vioblk_dev *dev)
 			do {
 				struct ioinfo *info;
 
-				info = vioblk_start_write(dev, cmd.sector + secbias,
+				info = vioblk_start_write(dev,
+				    cmd.sector + secbias,
 				    secdata_desc->addr, secdata_desc->len);
 
 				if (info == NULL) {
@@ -645,7 +659,8 @@ vioblk_notifyq(struct vioblk_dev *dev)
 
 			ds = VIRTIO_BLK_S_OK;
 			if (write_mem(ds_desc->addr, &ds, ds_desc->len)) {
-				log_warnx("fl vioblk: can't write device status "
+				log_warnx("fl vioblk: "
+				    "can't write device status "
 				    "data @ 0x%llx", ds_desc->addr);
 				dump_descriptor_chain(desc, cmd_desc_idx);
 				goto out;
@@ -751,6 +766,7 @@ virtio_blk_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 				dev->cfg.queue_notify = 0;
 				dev->cfg.isr_status = 0;
 				dev->vq[0].last_avail = 0;
+				vcpu_deassert_pic_irq(dev->vm_id, 0, dev->irq);
 			}
 			break;
 		default:
@@ -867,7 +883,8 @@ virtio_blk_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 				*data |= (uint32_t)(dev->max_xfer >> 16) & 0xFF;
 			} else if (sz == 2) {
 				*data &= 0xFFFF0000;
-				*data |= (uint32_t)(dev->max_xfer >> 16) & 0xFFFF;
+				*data |= (uint32_t)(dev->max_xfer >> 16)
+				    & 0xFFFF;
 			}
 			/* XXX handle invalid sz */
 			break;
@@ -918,6 +935,7 @@ virtio_blk_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		case VIRTIO_CONFIG_ISR_STATUS:
 			*data = dev->cfg.isr_status;
 			dev->cfg.isr_status = 0;
+			vcpu_deassert_pic_irq(dev->vm_id, 0, dev->irq);
 			break;
 		}
 	}
@@ -973,6 +991,7 @@ virtio_net_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 				dev->vq[RXQ].notified_avail = 0;
 				dev->vq[TXQ].last_avail = 0;
 				dev->vq[TXQ].notified_avail = 0;
+				vcpu_deassert_pic_irq(dev->vm_id, 0, dev->irq);
 			}
 			break;
 		default:
@@ -1013,6 +1032,7 @@ virtio_net_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		case VIRTIO_CONFIG_ISR_STATUS:
 			*data = dev->cfg.isr_status;
 			dev->cfg.isr_status = 0;
+			vcpu_deassert_pic_irq(dev->vm_id, 0, dev->irq);
 			break;
 		}
 	}
@@ -1718,22 +1738,56 @@ vmmci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		case VIRTIO_CONFIG_ISR_STATUS:
 			*data = vmmci.cfg.isr_status;
 			vmmci.cfg.isr_status = 0;
+			vcpu_deassert_pic_irq(vmmci.vm_id, 0, vmmci.irq);
 			break;
 		}
 	}
 	return (0);
 }
 
+int
+virtio_get_base(int fd, char *path, size_t npath, int type, const char *dpath)
+{
+	switch (type) {
+	case VMDF_RAW:
+		return 0;
+	case VMDF_QCOW2:
+		return virtio_qcow2_get_base(fd, path, npath, dpath);
+	}
+	log_warnx("%s: invalid disk format", __func__);
+	return -1;
+}
+
+/*
+ * Initializes a struct virtio_backing using the list of fds.
+ */
+static int
+virtio_init_disk(struct virtio_backing *file, off_t *sz,
+    int *fd, size_t nfd, int type)
+{
+	/* 
+	 * probe disk types in order of preference, first one to work wins.
+	 * TODO: provide a way of specifying the type and options.
+	 */
+	switch (type) {
+	case VMDF_RAW:
+		return virtio_raw_init(file, sz, fd, nfd);
+	case VMDF_QCOW2:
+		return virtio_qcow2_init(file, sz, fd, nfd);
+	}
+	log_warnx("%s: invalid disk format", __func__);
+	return -1;
+}
+
 void
-virtio_init(struct vmd_vm *vm, int child_cdrom, int *child_disks,
-    int *child_taps)
+virtio_init(struct vmd_vm *vm, int child_cdrom,
+    int child_disks[][VM_MAX_BASE_PER_DISK], int *child_taps)
 {
 	struct vmop_create_params *vmc = &vm->vm_params;
 	struct vm_create_params *vcp = &vmc->vmc_params;
 	uint8_t id;
 	uint8_t i;
 	int ret;
-	off_t sz;
 
 	/* Virtio entropy device */
 	if (pci_add_device(&id, PCI_VENDOR_QUMRANET,
@@ -1760,6 +1814,8 @@ virtio_init(struct vmd_vm *vm, int child_cdrom, int *child_disks,
 	    sizeof(struct vring_desc) * VIORND_QUEUE_SIZE
 	    + sizeof(uint16_t) * (2 + VIORND_QUEUE_SIZE));
 	viornd.pci_id = id;
+	viornd.irq = pci_get_dev_irq(id);
+	viornd.vm_id = vcp->vcp_id;
 
 	if (vcp->vcp_ndisks > 0) {
 		nr_vioblk = vcp->vcp_ndisks;
@@ -1772,9 +1828,6 @@ virtio_init(struct vmd_vm *vm, int child_cdrom, int *child_disks,
 
 		/* One virtio block device for each disk defined in vcp */
 		for (i = 0; i < vcp->vcp_ndisks; i++) {
-			if ((sz = lseek(child_disks[i], 0, SEEK_END)) == -1)
-				continue;
-
 			if (pci_add_device(&id, PCI_VENDOR_QUMRANET,
 			    PCI_PRODUCT_QUMRANET_VIO_BLOCK,
 			    PCI_CLASS_MASS_STORAGE,
@@ -1798,11 +1851,19 @@ virtio_init(struct vmd_vm *vm, int child_cdrom, int *child_disks,
 			    sizeof(struct vring_desc) * VIOBLK_QUEUE_SIZE
 			    + sizeof(uint16_t) * (2 + VIOBLK_QUEUE_SIZE));
 			vioblk[i].vq[0].last_avail = 0;
-			vioblk[i].fd = child_disks[i];
-			vioblk[i].sz = sz / 512;
 			vioblk[i].cfg.device_feature = VIRTIO_BLK_F_SIZE_MAX;
 			vioblk[i].max_xfer = 1048576;
 			vioblk[i].pci_id = id;
+			vioblk[i].vm_id = vcp->vcp_id;
+			vioblk[i].irq = pci_get_dev_irq(id);
+			if (virtio_init_disk(&vioblk[i].file, &vioblk[i].sz,
+			    child_disks[i], vmc->vmc_diskbases[i],
+			    vmc->vmc_disktypes[i]) == -1) {
+				log_warnx("%s: unable to determine disk format",
+				    __func__);
+				return;
+			}
+			vioblk[i].sz /= 512;
 		}
 	}
 
@@ -1879,14 +1940,17 @@ virtio_init(struct vmd_vm *vm, int child_cdrom, int *child_disks,
 			    vmc->vmc_ifflags[i] & VMIFF_LOCKED ? 1 : 0;
 			vionet[i].local =
 			    vmc->vmc_ifflags[i] & VMIFF_LOCAL ? 1 : 0;
+			if (i == 0 && vmc->vmc_bootdevice & VMBOOTDEV_NET)
+				vionet[i].pxeboot = 1;
 			vionet[i].idx = i;
 			vionet[i].pci_id = id;
 
-			log_debug("%s: vm \"%s\" vio%u lladdr %s%s%s",
+			log_debug("%s: vm \"%s\" vio%u lladdr %s%s%s%s",
 			    __func__, vcp->vcp_name, i,
 			    ether_ntoa((void *)vionet[i].mac),
 			    vionet[i].lockedmac ? ", locked" : "",
-			    vionet[i].local ? ", local" : "");
+			    vionet[i].local ? ", local" : "",
+			    vionet[i].pxeboot ? ", pxeboot" : "");
 		}
 	}
 
@@ -1925,14 +1989,19 @@ virtio_init(struct vmd_vm *vm, int child_cdrom, int *child_disks,
 			    + sizeof(uint16_t) * (2 + VIOSCSI_QUEUE_SIZE));
 			vioscsi->vq[i].last_avail = 0;
 		}
-		sz = lseek(child_cdrom, 0, SEEK_END);
-		vioscsi->fd = child_cdrom;
+		if (virtio_init_disk(&vioscsi->file, &vioscsi->sz,
+		    &child_cdrom, 1, VMDF_RAW) == -1) {
+			log_warnx("%s: unable to determine iso format",
+			    __func__);
+			return;
+		}
 		vioscsi->locked = 0;
 		vioscsi->lba = 0;
-		vioscsi->sz = sz;
-		vioscsi->n_blocks = sz >> 11; /* num of 2048 blocks in file */
+		vioscsi->n_blocks = vioscsi->sz >> 11; /* num of 2048 blocks in file */
 		vioscsi->max_xfer = VIOSCSI_BLOCK_SIZE_CDROM;
 		vioscsi->pci_id = id;
+		vioscsi->vm_id = vcp->vcp_id;
+		vioscsi->irq = pci_get_dev_irq(id);
 	}
 
 	/* virtio control device */
@@ -1963,6 +2032,19 @@ virtio_init(struct vmd_vm *vm, int child_cdrom, int *child_disks,
 	evtimer_set(&vmmci.timeout, vmmci_timeout, NULL);
 }
 
+void
+virtio_shutdown(struct vmd_vm *vm)
+{
+	int i;
+
+	/* ensure that our disks are synced */
+	if (vioscsi != NULL)
+		vioscsi->file.close(vioscsi->file.p, 0);
+
+	for (i = 0; i < nr_vioblk; i++)
+		vioblk[i].file.close(vioblk[i].file.p, 0);
+}
+
 int
 vmmci_restore(int fd, uint32_t vm_id)
 {
@@ -1978,13 +2060,14 @@ vmmci_restore(int fd, uint32_t vm_id)
 		return (-1);
 	}
 	vmmci.vm_id = vm_id;
+	vmmci.irq = pci_get_dev_irq(vmmci.pci_id);
 	memset(&vmmci.timeout, 0, sizeof(struct event));
 	evtimer_set(&vmmci.timeout, vmmci_timeout, NULL);
 	return (0);
 }
 
 int
-viornd_restore(int fd)
+viornd_restore(int fd, struct vm_create_params *vcp)
 {
 	log_debug("%s: receiving viornd", __func__);
 	if (atomicio(read, fd, &viornd, sizeof(viornd)) != sizeof(viornd)) {
@@ -1996,6 +2079,9 @@ viornd_restore(int fd)
 		    __progname);
 		return (-1);
 	}
+	viornd.vm_id = vcp->vcp_id;
+	viornd.irq = pci_get_dev_irq(viornd.pci_id);
+
 	return (0);
 }
 
@@ -2046,6 +2132,7 @@ vionet_restore(int fd, struct vmd_vm *vm, int *child_taps)
 			vionet[i].rx_pending = 0;
 			vionet[i].vm_id = vcp->vcp_id;
 			vionet[i].vm_vmid = vm->vm_vmid;
+			vionet[i].irq = pci_get_dev_irq(vionet[i].pci_id);
 
 			memset(&vionet[i].event, 0, sizeof(struct event));
 			event_set(&vionet[i].event, vionet[i].fd,
@@ -2061,10 +2148,11 @@ vionet_restore(int fd, struct vmd_vm *vm, int *child_taps)
 }
 
 int
-vioblk_restore(int fd, struct vm_create_params *vcp, int *child_disks)
+vioblk_restore(int fd, struct vmop_create_params *vmc,
+    int child_disks[][VM_MAX_BASE_PER_DISK])
 {
+	struct vm_create_params *vcp = &vmc->vmc_params;
 	uint8_t i;
-	off_t sz;
 
 	nr_vioblk = vcp->vcp_ndisks;
 	vioblk = calloc(vcp->vcp_ndisks, sizeof(struct vioblk_dev));
@@ -2080,16 +2168,21 @@ vioblk_restore(int fd, struct vm_create_params *vcp, int *child_disks)
 		return (-1);
 	}
 	for (i = 0; i < vcp->vcp_ndisks; i++) {
-		if ((sz = lseek(child_disks[i], 0, SEEK_END)) == -1)
-			continue;
-
 		if (pci_set_bar_fn(vioblk[i].pci_id, 0, virtio_blk_io,
 		    &vioblk[i])) {
 			log_warnx("%s: can't set bar fn for virtio block "
 			    "device", __progname);
 			return (-1);
 		}
-		vioblk[i].fd = child_disks[i];
+		if (virtio_init_disk(&vioblk[i].file, &vioblk[i].sz,
+		    child_disks[i], vmc->vmc_diskbases[i],
+		    vmc->vmc_disktypes[i]) == -1)  {
+			log_warnx("%s: unable to determine disk format",
+			    __func__);
+			return (-1);
+		}
+		vioblk[i].vm_id = vcp->vcp_id;
+		vioblk[i].irq = pci_get_dev_irq(vioblk[i].pci_id);
 	}
 	return (0);
 }
@@ -2097,8 +2190,6 @@ vioblk_restore(int fd, struct vm_create_params *vcp, int *child_disks)
 int
 vioscsi_restore(int fd, struct vm_create_params *vcp, int child_cdrom)
 {
-	off_t sz;
-
 	if (!strlen(vcp->vcp_cdrom))
 		return (0);
 
@@ -2116,31 +2207,35 @@ vioscsi_restore(int fd, struct vm_create_params *vcp, int child_cdrom)
 		return (-1);
 	}
 
-	sz = lseek(child_cdrom, 0, SEEK_END);
-
 	if (pci_set_bar_fn(vioscsi->pci_id, 0, vioscsi_io, vioscsi)) {
 		log_warnx("%s: can't set bar fn for vmm control device",
 		    __progname);
 		return (-1);
 	}
 
-	vioscsi->fd = child_cdrom;
+	if (virtio_init_disk(&vioscsi->file, &vioscsi->sz, &child_cdrom, 1,
+	    VMDF_RAW) == -1) {
+		log_warnx("%s: unable to determine iso format", __func__);
+		return (-1);
+	}
+	vioscsi->vm_id = vcp->vcp_id;
+	vioscsi->irq = pci_get_dev_irq(vioscsi->pci_id);
 
 	return (0);
 }
 
 int
-virtio_restore(int fd, struct vmd_vm *vm, int child_cdrom, int *child_disks,
-    int *child_taps)
+virtio_restore(int fd, struct vmd_vm *vm, int child_cdrom,
+    int child_disks[][VM_MAX_BASE_PER_DISK], int *child_taps)
 {
 	struct vmop_create_params *vmc = &vm->vm_params;
 	struct vm_create_params *vcp = &vmc->vmc_params;
 	int ret;
 
-	if ((ret = viornd_restore(fd)) == -1)
+	if ((ret = viornd_restore(fd, vcp)) == -1)
 		return ret;
 
-	if ((ret = vioblk_restore(fd, vcp, child_disks)) == -1)
+	if ((ret = vioblk_restore(fd, vmc, child_disks)) == -1)
 		return ret;
 
 	if ((ret = vioscsi_restore(fd, vcp, child_cdrom)) == -1)
