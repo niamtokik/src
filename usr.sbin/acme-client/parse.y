@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <glob.h>
 
 #include "parse.h"
 
@@ -119,14 +120,19 @@ grammar		: /* empty */
 
 include		: INCLUDE STRING		{
 			struct file	*nfile;
+			glob_t g;
+			size_t i;
 
-			if ((nfile = pushfile($2)) == NULL) {
-				yyerror("failed to include file %s", $2);
-				free($2);
-				YYERROR;
+			g.gl_offs=0;
+			glob($2, GLOB_DOOFFS, NULL, &g);
+			for(i=0;i<g.gl_pathc;++i) {
+				if ((nfile = pushfile(g.gl_pathv[i])) == NULL) {
+					yyerror("failed to include file %s", g.gl_pathv[i]);
+					YYERROR;
+				}
 			}
 			free($2);
-
+			
 			file = nfile;
 			lungetc('\n');
 		}
