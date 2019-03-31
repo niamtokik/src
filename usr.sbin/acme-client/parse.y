@@ -281,6 +281,10 @@ domainoptsl	: ALTERNATIVE NAMES '{' altname_l '}'
 				yyerror("domain key file already used");
 				YYERROR;
 			}
+			if (domain->wildcard != 0) {
+				yyerror("can't set alternatives name with wildcards");
+				YYERROR;
+			}
 			domain->key = s;
 		}
 		| DOMAIN CERT STRING {
