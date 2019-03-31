@@ -102,6 +102,7 @@ typedef struct {
 %token	YES NO
 %token	INCLUDE
 %token	ERROR
+%token	WILDCARD
 %token	<v.string>	STRING
 %token	<v.number>	NUMBER
 %type	<v.string>	string
@@ -306,7 +307,6 @@ domainoptsl	: ALTERNATIVE NAMES '{' altname_l '}'
 			char *s;
 			if (domain->chain != NULL) {
 				yyerror("duplicate chain");
-				YYERROR;
 			}
 			if ((s = strdup($4)) == NULL)
 				err(EXIT_FAILURE, "strdup");
@@ -356,6 +356,13 @@ domainoptsl	: ALTERNATIVE NAMES '{' altname_l '}'
 			if ((s = strdup($2)) == NULL)
 				err(EXIT_FAILURE, "strdup");
 			domain->challengedir = s;
+		}
+		| WILDCARD {
+			if (domain->altname_count != 0) {
+				yyerror("can't set wildcard domain with alternative names");
+				YYERROR;
+			}
+			domain->wildcard = 1;
 		}
 		;
 
@@ -434,6 +441,7 @@ lookup(char *s)
 		{"sign",		SIGN},
 		{"url",			URL},
 		{"with",		WITH},
+		{"wildcard",		WILDCARD},
 	};
 	const struct keywords	*p;
 

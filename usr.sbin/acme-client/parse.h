@@ -45,6 +45,7 @@ struct domain_c {
 	char			*fullchain;
 	char		       	*auth;
 	char		       	*challengedir;
+	int			wildcard;
 };
 
 struct altname_c {
