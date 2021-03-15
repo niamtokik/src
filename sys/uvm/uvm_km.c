@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_km.c,v 1.139 2020/12/15 22:14:42 mpi Exp $	*/
+/*	$OpenBSD: uvm_km.c,v 1.141 2021/03/12 14:15:49 jsg Exp $	*/
 /*	$NetBSD: uvm_km.c,v 1.42 2001/01/14 02:10:01 thorpej Exp $	*/
 
 /* 
@@ -145,7 +145,7 @@ struct vm_map *kernel_map = NULL;
 struct uvm_constraint_range	no_constraint = { 0x0, (paddr_t)-1 };
 
 /*
- * local data structues
+ * local data structures
  */
 static struct vm_map		kernel_map_store;
 
@@ -242,6 +242,7 @@ uvm_km_pgremove(struct uvm_object *uobj, vaddr_t start, vaddr_t end)
 	struct vm_page *pp;
 	voff_t curoff;
 	int slot;
+	int swpgonlydelta = 0;
 
 	KASSERT(uobj->pgops == &aobj_pager);
 
@@ -262,8 +263,13 @@ uvm_km_pgremove(struct uvm_object *uobj, vaddr_t start, vaddr_t end)
 			uvm_pagefree(pp);
 			uvm_unlock_pageq();
 		} else if (slot != 0) {
-			uvmexp.swpgonly--;
+			swpgonlydelta++;
 		}
+	}
+
+	if (swpgonlydelta > 0) {
+		KASSERT(uvmexp.swpgonly >= swpgonlydelta);
+		atomic_add_int(&uvmexp.swpgonly, -swpgonlydelta);
 	}
 }
 

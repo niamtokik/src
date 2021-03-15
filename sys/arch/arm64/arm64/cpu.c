@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.46 2021/01/29 08:48:19 jsg Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.51 2021/03/11 11:16:55 jsg Exp $	*/
 
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
@@ -79,6 +79,7 @@
 #define CPU_PART_X_GENE		0x000
 
 #define CPU_PART_ICESTORM	0x022
+#define CPU_PART_FIRESTORM	0x023
 
 #define CPU_IMPL(midr)  (((midr) >> 24) & 0xff)
 #define CPU_PART(midr)  (((midr) >> 4) & 0xfff)
@@ -134,6 +135,7 @@ struct cpu_cores cpu_cores_amcc[] = {
 
 struct cpu_cores cpu_cores_apple[] = {
 	{ CPU_PART_ICESTORM, "Icestorm" },
+	{ CPU_PART_FIRESTORM, "Firestorm" },
 	{ 0, NULL },
 };
 
@@ -152,6 +154,10 @@ const struct implementers {
 
 char cpu_model[64];
 int cpu_node;
+
+#ifdef CRYPTO
+int arm64_has_aes;
+#endif
 
 struct cpu_info *cpu_info_list = &cpu_info_primary;
 
@@ -242,6 +248,7 @@ cpu_identify(struct cpu_info *ci)
 		if (clidr & CLIDR_CTYPE_INSN) {
 			WRITE_SPECIALREG(csselr_el1,
 			    i << CSSELR_LEVEL_SHIFT | CSSELR_IND);
+			__asm volatile("isb");
 			ccsidr = READ_SPECIALREG(ccsidr_el1);
 			sets = CCSIDR_SETS(ccsidr);
 			ways = CCSIDR_WAYS(ccsidr);
@@ -254,6 +261,7 @@ cpu_identify(struct cpu_info *ci)
 		}
 		if (clidr & CLIDR_CTYPE_DATA) {
 			WRITE_SPECIALREG(csselr_el1, i << CSSELR_LEVEL_SHIFT);
+			__asm volatile("isb");
 			ccsidr = READ_SPECIALREG(ccsidr_el1);
 			sets = CCSIDR_SETS(ccsidr);
 			ways = CCSIDR_WAYS(ccsidr);
@@ -264,6 +272,7 @@ cpu_identify(struct cpu_info *ci)
 		}
 		if (clidr & CLIDR_CTYPE_UNIFIED) {
 			WRITE_SPECIALREG(csselr_el1, i << CSSELR_LEVEL_SHIFT);
+			__asm volatile("isb");
 			ccsidr = READ_SPECIALREG(ccsidr_el1);
 			sets = CCSIDR_SETS(ccsidr);
 			ways = CCSIDR_WAYS(ccsidr);
@@ -375,6 +384,9 @@ cpu_identify(struct cpu_info *ci)
 	if (ID_AA64ISAR0_AES(id) >= ID_AA64ISAR0_AES_BASE) {
 		printf("%sAES", sep);
 		sep = ",";
+#ifdef CRYPTO
+		arm64_has_aes = 1;
+#endif
 	}
 	if (ID_AA64ISAR0_AES(id) >= ID_AA64ISAR0_AES_PMULL)
 		printf("+PMULL");
@@ -386,6 +398,18 @@ cpu_identify(struct cpu_info *ci)
 
 	if (ID_AA64ISAR1_DPB(id) >= ID_AA64ISAR1_DPB_IMPL) {
 		printf("%sDPB", sep);
+		sep = ",";
+	}
+
+	/*
+	 * ID_AA64MMFR0
+	 *
+	 * We only print ASIDBits for now.
+	 */
+	id = READ_SPECIALREG(id_aa64mmfr0_el1);
+
+	if (ID_AA64MMFR0_ASID_BITS(id) == ID_AA64MMFR0_ASID_BITS_16) {
+		printf("%sASID16", sep);
 		sep = ",";
 	}
 
@@ -867,7 +891,7 @@ cpu_opp_init(struct cpu_info *ci, uint32_t phandle)
 	cooling_device_register(cd);
 
 	/*
-	 * Do addional checks at mountroot when all the clocks and
+	 * Do additional checks at mountroot when all the clocks and
 	 * regulators are available.
 	 */
 	config_mountroot(ci->ci_dev, cpu_opp_mountroot);
